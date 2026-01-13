@@ -1,0 +1,17 @@
+family_base,knob_variant,ratio_variant,pipeline,runs_total_x,infeasible_runs_x,feasible_runs_x,fallback_mean,fallback_sem,infeasible_rate_x,runs_total_y,infeasible_runs_y,feasible_runs_y,penalty_mean,penalty_sem,infeasible_rate_y,_x
+vol,highvar,off50_on50,MILP(offSlack)+CostAwareBestFit,50,0,50,0.0,0.0,0.0,50,0,50,0.2,0.06998542122237651,0.0,highvar
+vol,highvar,off50_on50,MILP(offSlack)+PrimalDual,50,0,50,0.0,0.0,0.0,50,0,50,0.2,0.06388765649999399,0.0,highvar
+vol,highvar,off50_on50,MILP+CostAwareBestFit,50,0,50,0.0,0.0,0.0,50,0,50,0.3,0.08689660757568883,0.0,highvar
+vol,highvar,off50_on50,MILP+DynamicLearning,50,0,50,0.0,0.0,0.0,50,0,50,0.18,0.06187545093630775,0.0,highvar
+vol,highvar,off50_on50,MILP+PrimalDual,50,0,50,0.0,0.0,0.0,50,0,50,0.4,0.12777531299998798,0.0,highvar
+vol,highvar,off50_on50,UtilizationPriced+CostAwareBestFit,50,0,50,0.0,0.0,0.0,50,0,50,0.14,0.0572142411271451,0.0,highvar
+vol,highvar,off50_on50,UtilizationPriced+DynamicLearning,50,0,50,0.0,0.0,0.0,50,0,50,0.06,0.033926691677251195,0.0,highvar
+vol,highvar,off50_on50,UtilizationPriced+PrimalDual,50,0,50,0.0,0.0,0.0,50,0,50,0.12,0.04642307659791976,0.0,highvar
+vol,lowvar,off50_on50,MILP(offSlack)+CostAwareBestFit,50,0,50,0.0,0.0,0.0,50,0,50,0.18,0.061875450936307766,0.0,lowvar
+vol,lowvar,off50_on50,MILP(offSlack)+PrimalDual,50,0,50,0.0,0.0,0.0,50,0,50,0.26,0.0848046975980333,0.0,lowvar
+vol,lowvar,off50_on50,MILP+CostAwareBestFit,50,0,50,0.0,0.0,0.0,50,0,50,0.3,0.0769309258162072,0.0,lowvar
+vol,lowvar,off50_on50,MILP+DynamicLearning,50,0,50,0.0,0.0,0.0,50,0,50,0.08,0.03875617133214439,0.0,lowvar
+vol,lowvar,off50_on50,MILP+PrimalDual,50,0,50,0.0,0.0,0.0,50,0,50,0.36,0.09372125409632415,0.0,lowvar
+vol,lowvar,off50_on50,UtilizationPriced+CostAwareBestFit,50,0,50,0.0,0.0,0.0,50,0,50,0.18,0.0548839220351387,0.0,lowvar
+vol,lowvar,off50_on50,UtilizationPriced+DynamicLearning,50,0,50,0.0,0.0,0.0,50,0,50,0.08,0.03875617133214439,0.0,lowvar
+vol,lowvar,off50_on50,UtilizationPriced+PrimalDual,50,0,50,0.0,0.0,0.0,50,0,50,0.22,0.06571428571428571,0.0,lowvar

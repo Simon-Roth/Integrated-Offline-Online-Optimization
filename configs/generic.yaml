@@ -1,7 +1,7 @@
 problem:
   N: 10
   M_off: 60
-  dimensions: 3
+  dimensions: 1
   capacities: []
   capacity_mean: 30.0
   capacity_std: 0.1
@@ -30,12 +30,6 @@ stoch:
   horizon_dist: "fixed" # distribution of the numnber of online items M_onl
   horizon: 240 # if fixed, M_onl = horizon
 
-pred:
-  use_predictions: false
-  horizon_hat:
-  freq_hat:
-  trust_lambda: 0.9
-
 slack:
   enforce_slack: false # if True, slack capacities reserved in items for online phase
   fraction: 0.1 # if enforce_slack is True -> percentage of slack reserved for online items
@@ -43,26 +37,13 @@ slack:
   # enforce_slack: true
   # fraction: 0.05
 
-util_pricing:
-  update_rule: "polynomial"  # "polynomial" | "exponential"
-  price_exponent: 2.0        # used when update_rule == "polynomial"
-  exp_rate: 1.5              # used when update_rule == "exponential"
-  vector_prices: true
-
-heuristics:
-  size_key: "max"
-  residual_scalarization: "max"
-
-dla:
-  epsilon: 0.1           # sampling fraction controlling phase boundaries
-  log_prices: false      # if true, write per-phase price logs for plotting
-  output_dir: "results/dla"
-  min_phase_len: 1       # optional lower boufnd on phase length
-  use_offline_slack: true
+heuristics: # if d > 1 
+  size_key: "max" # metric used for sorting in heuristics, e.g., for ...decreasing
+  residual_scalarization: "max" # metric used for evaluating goodness of fit
 
 solver:
   use_warm_start: True # if True, automatically generate warm start using heuristic
   warm_start_heuristic: "CBFD" # "FFD", "BFD", "CBFD", "PD" or "none"
 
 eval:
-  seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,17,18,19,20,21,22,23,24,25,26,27,28,29,30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
+  seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]

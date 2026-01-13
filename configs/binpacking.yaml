@@ -1,0 +1,12 @@
+util_pricing:
+  update_rule: "polynomial"  # "polynomial" | "exponential"
+  price_exponent: 2.0        # used when update_rule == "polynomial"
+  exp_rate: 1.5              # used when update_rule == "exponential"
+  vector_prices: true
+
+dla:
+  epsilon: 0.1           # sampling fraction controlling phase boundaries
+  log_prices: false      # if true, write per-phase price logs for plotting
+  output_dir: "binpacking/results/dla"
+  min_phase_len: 1       # optional lower boufnd on phase length
+  use_offline_slack: true

@@ -1,0 +1,362 @@
+from __future__ import annotations
+
+"""
+Dynamic Learning Algorithm 
+
+Key elements implemented here:
+ - Geometric phase schedule t_k = epsilon * M_onl * 2^k (with integer rounding).
+ - Capacity scaling per phase: b_i^(k) = (1 - h_k) * (t_k / M_onl) * C_i where
+   h_k = epsilon * sqrt(M_onl / t_k).
+ - Dual-based price computation on the observed items so far (fractional LP).
+ - Online placement using cost + price scoring, reusing the primal-dual placement
+   helpers (feasibility, optional evictions).
+
+The policy optionally logs per-phase prices/residuals to a JSON file if a path is
+provided and cfg.dla.log_prices is True.
+"""
+
+import json
+import math
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Set, Tuple
+
+import gurobipy as gp
+from gurobipy import GRB
+import numpy as np
+
+from generic.config import Config
+from generic.general_utils import effective_capacity, scalarize_vector, vector_fits, residual_vector
+from generic.models import AssignmentState, Decision, Instance, OnlineItem
+from generic.online.policies import BaseOnlinePolicy, PolicyInfeasibleError
+from generic.online.state_utils import (
+    PlacementContext,
+    build_context,
+    execute_placement,
+    offline_volumes,
+    TOLERANCE,
+)
+
+
+class DynamicLearningPolicy(BaseOnlinePolicy):
+    """
+    Dynamic price-updating policy
+    """
+
+    def __init__(self, cfg: Config, price_path: Optional[Path] = None) -> None:
+        self.cfg = cfg
+        self.price_path = Path(price_path) if price_path else None
+
+        # Runtime state
+        self._phase_idx: int = -1
+        self._schedule: List[int] = []
+        self._current_prices: Dict[int, np.ndarray] = {}
+        self._processed: int = 0  # number of arrivals already placed
+        self._seen_items: List[OnlineItem] = []
+        self._log_records: List[Dict[str, object]] = []
+
+   
+    def select_bin(
+        self,
+        item: OnlineItem,
+        state: AssignmentState,
+        instance: Instance,
+        feasible_row: Optional[np.ndarray],
+    ) -> Decision:
+        # Lazily build phase schedule on the first call.
+        if not self._schedule:
+            self._schedule = self._build_schedule(len(instance.online_items))
+
+        # Update prices if a phase boundary was reached after the last item.
+        self._maybe_update_prices(state, instance)
+
+        ctx: PlacementContext = build_context(self.cfg, instance, state)
+        candidate_bins = self._candidate_bins(item, instance, feasible_row)
+        if not candidate_bins:
+            raise PolicyInfeasibleError(f"No feasible regular bin for online item {item.id}")
+
+        best_decision: Optional[Decision] = None
+        best_score = float("inf")
+
+        # First, try to place without evictions.
+        for bin_id in candidate_bins:
+            if not vector_fits(ctx.loads[bin_id], item.volume, ctx.effective_caps[bin_id], TOLERANCE):
+                continue
+
+            score = self._score(bin_id, item, instance)
+            if score >= best_score - 1e-12:
+                continue
+
+            decision = execute_placement(
+                bin_id,
+                item,
+                ctx,
+                eviction_order_fn=self._eviction_order_desc,
+                destination_fn=self._select_reassignment_bin,
+                allow_eviction=False,
+            )
+            if decision is not None:
+                best_score = score
+                best_decision = decision
+
+        if best_decision is not None:
+            self._mark_processed(item)
+            return best_decision
+
+        # Allow evictions if no feasible bin remained.
+        for bin_id in candidate_bins:
+            score = self._score(bin_id, item, instance)
+            if score >= best_score - 1e-12:
+                continue
+            decision = execute_placement(
+                bin_id,
+                item,
+                ctx,
+                eviction_order_fn=self._eviction_order_desc,
+                destination_fn=self._select_reassignment_bin,
+                allow_eviction=True,
+            )
+            if decision is not None:
+                best_score = score
+                best_decision = decision
+
+        if best_decision is not None:
+            self._mark_processed(item)
+            return best_decision
+
+        # No feasible regular bin (even with evictions) -> signal infeasibility.
+        raise PolicyInfeasibleError(f"DynamicLearningPolicy could not place item {item.id}")
+
+    # ------------------------------------------------------------------
+    # Pricing + scheduling
+    # ------------------------------------------------------------------
+    def _build_schedule(self, horizon: int) -> List[int]:
+        """Geometric schedule t_k = ε * M_onl * 2^k (rounded to ints)."""
+        eps = max(self.cfg.dla.epsilon, 1e-9)
+        min_len = max(1, int(self.cfg.dla.min_phase_len))
+        schedule: List[int] = []
+        base = math.ceil(eps * horizon)
+        t_k = max(min_len, base)
+        while t_k < horizon:
+            if schedule and t_k <= schedule[-1]:
+                t_k = schedule[-1] + min_len
+            schedule.append(min(t_k, horizon))
+            t_k = math.ceil(t_k * 2)
+        if schedule and schedule[-1] > horizon:
+            schedule[-1] = horizon
+        if not schedule or schedule[-1] < horizon:
+            schedule.append(horizon)
+        return schedule
+
+    def _maybe_update_prices(self, state: AssignmentState, instance: Instance) -> None:
+        """Update prices when we've completed a phase (after placing t_k items)."""
+        if self._processed == 0:
+            return
+        if self._phase_idx + 1 >= len(self._schedule):
+            return
+        next_boundary = self._schedule[self._phase_idx + 1]
+        if self._processed < next_boundary:
+            return
+
+        # Compute new prices using observed items up to t_k = next_boundary.
+        t_k = next_boundary
+        horizon = max(1, len(instance.online_items))
+        h_k = self.cfg.dla.epsilon * math.sqrt(horizon / float(t_k))
+        self._current_prices = self._compute_prices(instance, state, t_k, h_k)
+        self._phase_idx += 1
+        self._log_phase(t_k, h_k)
+
+    def _compute_prices(
+        self,
+        instance: Instance,
+        state: AssignmentState,
+        t_k: int,
+        h_k: float,
+    ) -> Dict[int, np.ndarray]:
+        """
+        Solve fractional LP on observed items to get dual prices for capacities.
+        """
+        m = gp.Model("dla_fractional_pricing")
+        m.Params.OutputFlag = 1 if self.cfg.dla.log_prices else 0
+
+        observed: Sequence[OnlineItem] = self._seen_items[:t_k]
+        online_volumes = {item.id: item.volume for item in observed}
+        N = len(instance.bins)
+        dims = instance.bins[0].capacity.shape[0] if instance.bins else 1
+
+        # Capacity scaling per phase, optionally respecting offline slack.
+        caps_scaled: List[np.ndarray] = []
+        use_slack = self.cfg.dla.use_offline_slack and self.cfg.slack.enforce_slack
+        slack_fraction = self.cfg.slack.fraction if use_slack else 0.0
+        offline_load = np.zeros((N, dims), dtype=float)
+        off_vols = offline_volumes(instance)
+        fallback_idx = instance.fallback_bin_index
+        # Count fixed offline load currently occupying regular bins.
+        for item_id, bin_id in state.assigned_bin.items():
+            if item_id >= len(instance.offline_items):
+                continue
+            if bin_id < 0 or bin_id >= N or bin_id == fallback_idx:
+                continue
+            offline_load[bin_id] += off_vols.get(item_id, np.zeros(dims))
+
+        horizon = float(len(instance.online_items))
+        for idx, bin_spec in enumerate(instance.bins):
+            phys = bin_spec.capacity
+            eff_total = effective_capacity(phys, use_slack, slack_fraction)
+            base_residual = np.maximum(0.0, eff_total - offline_load[idx])
+            scaled = (1.0 - h_k) * (t_k / horizon) * base_residual
+            caps_scaled.append(np.maximum(0.0, scaled))
+
+        # Residual after offline load only (online load is modeled by LP vars).
+        residual = caps_scaled
+
+        x = {}
+        y_fallback = {}
+        for item in observed:
+            for i in item.feasible_bins:
+                x[(item.id, i)] = m.addVar(lb=0.0, ub=1.0, name=f"x_{item.id}_{i}")
+            y_fallback[item.id] = m.addVar(lb=0.0, ub=1.0, name=f"y_fallback_{item.id}")
+        m.update()
+
+        cap_constr: Dict[tuple[int, int], gp.Constr] = {}
+        for i in range(N):
+            for d in range(dims):
+                expr = gp.quicksum(
+                    online_volumes[j][d] * var
+                    for (j, ii), var in x.items()
+                    if ii == i
+                )
+                cap_constr[(i, d)] = m.addConstr(expr <= float(residual[i][d]), name=f"cap_{i}_{d}")
+
+        for item in observed:
+            item_vars = [var for (j, i), var in x.items() if j == item.id]
+            expr = gp.quicksum(item_vars) + y_fallback[item.id]
+            m.addConstr(expr == 1.0, name=f"assign_{item.id}")
+
+        fallback_cost = self.cfg.costs.huge_fallback
+        obj = gp.quicksum(instance.costs.assign[j, i] * var for (j, i), var in x.items())
+        obj += gp.quicksum(fallback_cost * y for y in y_fallback.values())
+        m.setObjective(obj, GRB.MINIMIZE)
+
+        m.optimize()
+        if m.Status != GRB.OPTIMAL:
+            raise RuntimeError(f"DLA pricing LP not optimal, status={m.Status}")
+
+        prices: Dict[int, np.ndarray] = {}
+        for i in range(N):
+            lam = np.zeros(dims, dtype=float)
+            for d in range(dims):
+                lam[d] = abs(float(cap_constr[(i, d)].Pi))
+            prices[i] = lam
+        return prices
+
+    def _log_phase(self, t_k: int, h_k: float) -> None:
+        if not self.cfg.dla.log_prices or self.price_path is None:
+            return
+        record = {
+            "phase": int(self._phase_idx),
+            "t_k": int(t_k),
+            "h_k": float(h_k),
+            "prices": {int(k): [float(x) for x in v.tolist()] for k, v in self._current_prices.items()},
+        }
+        self._log_records.append(record)
+        self.price_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.price_path, "w") as f:
+            json.dump(
+                {
+                    "epsilon": float(self.cfg.dla.epsilon),
+                    "schedule": self._schedule,
+                    "records": self._log_records,
+                },
+                f,
+                indent=2,
+            )
+
+    def _mark_processed(self, item: OnlineItem) -> None:
+        self._seen_items.append(item)
+        self._processed += 1
+
+    # ------------------------------------------------------------------
+    # Placement helpers (reuse primal-dual structure)
+    # ------------------------------------------------------------------
+    def _candidate_bins(
+        self,
+        item: OnlineItem,
+        instance: Instance,
+        feasible_row: Optional[np.ndarray],
+    ) -> List[int]:
+        regular_bins = len(instance.bins)
+        candidate_bins: Set[int] = set(item.feasible_bins)
+        if feasible_row is not None:
+            for idx, allowed in enumerate(feasible_row[:regular_bins]):
+                if allowed:
+                    candidate_bins.add(int(idx))
+        return sorted(b for b in candidate_bins if 0 <= b < regular_bins)
+
+    def _score(self, bin_id: int, item: OnlineItem, instance: Instance) -> float:
+        c_ji = float(instance.costs.assign[item.id, bin_id])
+        lam_i = self._current_prices.get(bin_id, np.zeros_like(item.volume))
+        if self.cfg.util_pricing.vector_prices:
+            return c_ji + float(np.dot(lam_i, item.volume))
+        lam_scalar = scalarize_vector(lam_i, "max")
+        return c_ji + lam_scalar * scalarize_vector(item.volume, self.cfg.heuristics.size_key)
+
+    def _eviction_order_desc(
+        self,
+        bin_id: int,
+        ctx: PlacementContext,
+    ) -> List[int]:
+        offline_ids = [
+            itm_id
+            for itm_id, assigned_bin in ctx.assignments.items()
+            if assigned_bin == bin_id and itm_id < len(ctx.instance.offline_items)
+        ]
+        size_key = self.cfg.heuristics.size_key
+        zero_vec = np.zeros_like(ctx.effective_caps[0])
+        offline_ids.sort(
+            key=lambda oid: scalarize_vector(ctx.offline_volumes.get(oid, zero_vec), size_key),
+            reverse=True,
+        )
+        return offline_ids
+
+    def _select_reassignment_bin(
+        self,
+        offline_id: int,
+        origin_bin: int,
+        ctx: PlacementContext,
+    ) -> Optional[int]:
+        zero_vec = np.zeros_like(ctx.effective_caps[0])
+        volume = ctx.offline_volumes.get(offline_id, zero_vec)
+        instance = ctx.instance
+        feasible_row = instance.feasible.feasible[offline_id]
+        regular_bins = len(instance.bins)
+        fallback_idx = instance.fallback_bin_index
+
+        best_candidate: Optional[int] = None
+        best_cost = float("inf")
+        best_residual = float("inf")
+
+        for candidate in range(regular_bins):
+            if candidate == origin_bin or feasible_row[candidate] != 1:
+                continue
+            residual_vec = residual_vector(ctx.loads[candidate], volume, ctx.effective_caps[candidate])
+            if not vector_fits(ctx.loads[candidate], volume, ctx.effective_caps[candidate], TOLERANCE):
+                continue
+            cost = instance.costs.assign[offline_id, candidate]
+            residual_score = scalarize_vector(residual_vec, self.cfg.heuristics.residual_scalarization)
+            if cost < best_cost - 1e-9 or (
+                abs(cost - best_cost) <= 1e-9 and residual_score < best_residual
+            ):
+                best_cost = cost
+                best_residual = residual_score
+                best_candidate = candidate
+
+        if best_candidate is not None:
+            return best_candidate
+
+        if (
+            self.cfg.problem.fallback_is_enabled
+            and fallback_idx < feasible_row.shape[0]
+            and feasible_row[fallback_idx] == 1
+        ):
+            return fallback_idx
+        return None
