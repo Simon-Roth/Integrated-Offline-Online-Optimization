@@ -21,7 +21,7 @@ class OnlineSolutionInfo:
     total_cost:
         Sum of incremental costs reported by the policy.
     fallback_items:
-        Number of items assigned to the fallback bin after the online phase.
+        Number of items assigned to the fallback bin after the online phase (0 if disabled).
     evicted_offline:
         Count of offline eviction events during the online phase (penalty-bearing moves).
     decisions:

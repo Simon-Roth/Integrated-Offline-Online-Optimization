@@ -10,7 +10,7 @@ class OfflineSolutionInfo:
     obj_value: float
     mip_gap: float
     runtime: float
-    assignments: np.ndarray  # shape: (M_off, N+1) binary matrix
+    assignments: np.ndarray  # shape: (M_off, N) or (M_off, N+1)
 
 
 def _status_name(code: int) -> str:

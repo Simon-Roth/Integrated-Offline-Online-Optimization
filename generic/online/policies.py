@@ -31,7 +31,7 @@ class BaseOnlinePolicy(Protocol):
         instance:
             The full problem instance (offline + online data).
         feasible_row:
-            Row of the feasibility matrix for this item, if available (length N+1).
+            Row of the feasibility matrix for this item, if available (length N or N+1).
 
         Returns
         -------

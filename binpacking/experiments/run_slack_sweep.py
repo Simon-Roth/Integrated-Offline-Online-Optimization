@@ -17,10 +17,11 @@ from generic.config import Config
 from binpacking.config import load_config
 from generic.general_utils import set_global_seed
 from generic.models import AssignmentState, Instance
-from binpacking.data.generators import generate_instance_with_online
+from binpacking.data.instance_generators import generate_instance_with_online
 from binpacking.experiments.optimal_benchmark import solve_full_horizon_optimum
 from binpacking.experiments.pipeline_registry import PIPELINE_REGISTRY, PIPELINES
-from binpacking.experiments.pipeline_runner import PipelineSpec, run_pipeline
+from generic.experiments.pipeline import PipelineSpec
+from binpacking.experiments.pipeline_runner import run_pipeline
 from binpacking.experiments.scenarios import ScenarioConfig, apply_config_overrides, select_scenarios
 from binpacking.experiments.utils import save_combined_result
 from generic.offline.models import OfflineSolutionInfo

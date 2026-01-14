@@ -80,6 +80,11 @@ class OnlineSolver:
                     decisions=decisions,
                 )
                 return state, info
+            if not self.cfg.problem.binpacking:
+                if decision.evicted_offline or decision.reassignments:
+                    raise PolicyInfeasibleError(
+                        "Evictions/reassignments are disabled when binpacking is False."
+                    )
             state_utils.apply_decision(
                 decision,
                 item,

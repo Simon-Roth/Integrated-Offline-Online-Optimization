@@ -7,7 +7,7 @@ from gurobipy import GRB
 
 from generic.config import Config
 from generic.models import Instance, AssignmentState
-from generic.general_utils import effective_capacity as _effective_capacity
+from generic.data.offline_milp_assembly import OfflineMILPData, build_offline_milp_data
 
 from generic.offline.models import OfflineSolutionInfo, _status_name
 
@@ -17,9 +17,9 @@ class OfflineMILPSolver:
 
     Eckpunkte:
     - Regular bins: Indizes 0..N-1 (harte Kapazitäten)
-    - Fallback bin: Index N (keine Kapazitätsgrenze), nur für OFFLINE-Items
+    - Fallback bin: Index N (optional; falls aktiviert)
     - Online-Items werden später behandelt (online-Phase)
-    - Feasibility-Graph wird respektiert (Variablen nur auf zulässigen Kanten)
+    - Feasibility-Graph wird respektiert (über Ax <= b)
     - Slack global konfigurierbar (Default: aus)
     """
 
@@ -40,12 +40,14 @@ class OfflineMILPSolver:
 
         # werden in _build_model gesetzt:
         self.model: Optional[gp.Model] = None
-        self.x: Dict[Tuple[int, int], gp.Var] = {}  # (j, i) -> Var
+        self.x: Optional[gp.MVar] = None
         self.N: int = 0
+        self.bins_total: int = 0
         self.M: int = 0
+        self.var_shape: Tuple[int, int] = (0, 0)
         self.fallback_idx: int = -1
+        self.dimensions: int = 1
         self.vol: Optional[np.ndarray] = None
-        self.cost: Optional[np.ndarray] = None
         self.feas: Optional[np.ndarray] = None
 
     # ---------- Public API ----------
@@ -58,12 +60,25 @@ class OfflineMILPSolver:
         """
         Modell bauen, lösen, Lösung extrahieren.
         """
-        self._build_model(inst)
-        
-        # Generate warm start if not provided but config requests it
+        data = build_offline_milp_data(inst, self.cfg, include_infeasible=True)
+
+        # Generate warm start if not provided but config requests it.
         if warm_start is None and self.cfg.solver.use_warm_start:
             warm_start = self._generate_warm_start(inst)
-        
+
+        return self.solve_from_data(data, warm_start=warm_start)
+
+    def solve_from_data(
+        self,
+        data: OfflineMILPData,
+        *,
+        warm_start: Optional[Dict[int, int]] = None,
+    ) -> Tuple[AssignmentState, OfflineSolutionInfo]:
+        """
+        Solve the MILP directly from A, b, c data (no instance generation needed).
+        """
+        self._build_model_from_data(data)
+
         if warm_start:
             self._apply_warm_start(warm_start)
 
@@ -81,67 +96,31 @@ class OfflineMILPSolver:
 
     # ---------- Model construction ----------
 
-    def _build_model(self, inst: Instance) -> None:
-        self.N = len(inst.bins)                 # reguläre Bins
-        self.M = len(inst.offline_items)        # Anzahl OFFLINE-Items
-        self.fallback_idx = inst.fallback_bin_index  # sollte == N sein (0-basiert)
-        assert self.fallback_idx == self.N, "Expected fallback index to be N (0-based)."
-
-        # Volumina und Kosten
-        self.vol = np.array([it.volume for it in inst.offline_items], dtype=float)
-        self.cost = inst.costs.assign[:self.M, :self.N+1]#.astype(float, copy=True)
-        self.feas = inst.feasible.feasible[:self.M, :self.N+1]#.astype(int, copy=True)
+    def _build_model_from_data(self, data: OfflineMILPData) -> None:
+        self.var_shape = data.var_shape
+        self.M, bins_total = self.var_shape
+        self.bins_total = bins_total
+        self.N = bins_total - 1 if data.fallback_idx >= 0 else bins_total
+        self.fallback_idx = data.fallback_idx
+        self.dimensions = data.dimensions
+        self.vol = data.volumes
+        self.feas = data.feasible
+        if self.fallback_idx >= 0:
+            assert self.fallback_idx == self.N, "Expected fallback index to be N (0-based)."
 
         # Gurobi-Modell
         self.model = gp.Model("offline_initial_allocation")
         m = self.model
-        self.x.clear()
+        num_vars = int(data.c.size)
 
-        # Variablen nur für zulässige Kanten (weil spart Speicher + Constraints)
-        for j in range(self.M):
-            for i in range(self.N + 1):  # inkl. Fallback
-                if self.feas[j, i] == 1:
-                    self.x[(j, i)] = m.addVar(vtype=GRB.BINARY, name=f"x_{j}_{i}")
-        m.update()
-
-        # Jede OFFLINE-Item-Zuweisung genau einmal
-        for j in range(self.M):
-            vars_j = [self.x[(j, i)] for i in range(self.N + 1) if (j, i) in self.x]
-            if not vars_j:
-                # sollte nicht passieren, da Fallback für OFFLINE existiert
-                raise ValueError(f"Offline item {j} has no feasible bin (including fallback).")
-            m.addConstr(gp.quicksum(vars_j) == 1, name=f"assign_{j}")
-
-        # Kapazitätsrestriktionen nur auf regulären Bins (0..N-1)
-        cap_used: Dict[int, np.ndarray] = {}
-        load_exprs: Dict[Tuple[int, int], gp.LinExpr] = {}
-        for i in range(self.N):
-            cap_i = _effective_capacity(
-                inst.bins[i].capacity,
-                self.cfg.slack.enforce_slack,
-                self.cfg.slack.fraction,
-            )
-            cap_used[i] = cap_i
-            for d in range(self.vol.shape[1]):
-                vars_i = []
-                coeffs = []
-                for j in range(self.M):
-                    if (j, i) in self.x:
-                        vars_i.append(self.x[(j, i)])
-                        coeffs.append(self.vol[j, d])
-                if vars_i:
-                    load_expr = gp.LinExpr(coeffs, vars_i)
-                    load_exprs[(i, d)] = load_expr
-                    m.addConstr(load_expr <= float(cap_i[d]), name=f"cap_{i}_{d}")
-
-        # Zielfunktion: minimale Zuweisungskosten
-        obj_terms = []
-        for j in range(self.M):
-            for i in range(self.N + 1):
-                if (j, i) in self.x:
-                    obj_terms.append(self.cost[j, i] * self.x[(j, i)])
-
-        m.setObjective(gp.quicksum(obj_terms), GRB.MINIMIZE)
+        if num_vars:
+            self.x = m.addMVar(shape=num_vars, vtype=GRB.BINARY, name="x")
+            if data.A.size:
+                m.addMConstr(data.A, self.x, "<", data.b, name="Axb")
+            m.setObjective(data.c @ self.x, GRB.MINIMIZE)
+        else:
+            self.x = m.addMVar(shape=0, vtype=GRB.BINARY, name="x")
+            m.setObjective(0.0, GRB.MINIMIZE)
         m.update()
 
     # ---------- Optional warm start ----------
@@ -159,12 +138,16 @@ class OfflineMILPSolver:
         """
         Warm-Start (Start-Lösung) setzen, sofern Kante zulässig ist.
         """
-        if self.model is None:
+        if self.model is None or self.x is None:
             return
+        M, Np1 = self.var_shape
         for j, i in warm_start.items():
-            var = self.x.get((j, i))
-            if var is not None:
-                var.Start = 1.0
+            if not (0 <= j < M and 0 <= i < Np1):
+                continue
+            if self.feas is not None and self.feas[j, i] == 0:
+                continue
+            idx = j * Np1 + i
+            self.x[idx].Start = 1.0
 
     # ---------- Extraction ----------
 
@@ -182,13 +165,14 @@ class OfflineMILPSolver:
         has_solution = (getattr(m, "SolCount", 0) is not None) and (m.SolCount > 0)
 
         # Dense 0/1-Matrix der Größe M x (N+1) bauen (auch wenn keine Lösung existiert)
-        x_sol = np.zeros((self.M, self.N + 1), dtype=int)
-        if has_solution:
-            for (j, i), var in self.x.items():
-                x_sol[j, i] = int(round(var.X))
+        x_sol = np.zeros(self.var_shape, dtype=int)
+        if has_solution and self.x is not None:
+            x_vec = np.asarray(self.x.X, dtype=float)
+            if x_vec.size:
+                x_sol = np.rint(x_vec.reshape(self.var_shape)).astype(int)
 
         # Loads & Zuordnungen nur berechnen, wenn eine Lösung existiert
-        load = np.zeros((self.N + 1, self.vol.shape[1]), dtype=float)
+        load = np.zeros((self.bins_total, self.dimensions), dtype=float)
         assigned_bin: Dict[int, int] = {}
         if has_solution:
             for j in range(self.M):
@@ -196,7 +180,7 @@ class OfflineMILPSolver:
                 assigned_bin[j] = i
                 if i < self.N:
                     load[i] += self.vol[j]
-                else: 
+                elif self.fallback_idx >= 0 and i == self.fallback_idx:
                     load[self.fallback_idx] += self.vol[j]
         state = AssignmentState(
             load=load,

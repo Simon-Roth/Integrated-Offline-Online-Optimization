@@ -10,7 +10,7 @@ from generic.models import AssignmentState, Instance
 from generic.offline.models import OfflineSolutionInfo
 from binpacking.offline.offline_heuristics.core import HeuristicSolutionInfo
 from generic.config import Config, SlackConfig, DLAConfig
-from binpacking.data.generators import generate_instance_with_online
+from binpacking.data.instance_generators import generate_instance_with_online
 from generic.online.online_solver import OnlineSolver
 from generic.online.state_utils import count_fallback_items, effective_capacities
 from generic.general_utils import scalarize_vector

@@ -1,10 +1,17 @@
-# binpacking/data/generators.py
+# generic/data/instance_generators.py
 from __future__ import annotations
 from typing import List, Tuple, Optional, Sequence
 import numpy as np
 from generic.config import Config
 from generic.models import BinSpec, ItemSpec, Instance, Costs, FeasibleGraph, OnlineItem
-from generic.general_utils import validate_capacities, make_rng, validate_mask
+from generic.general_utils import (
+    validate_capacities,
+    make_rng,
+    validate_mask,
+)
+from generic.data.offline_milp_assembly import OfflineMILPData, build_offline_milp_data
+
+
 
 
 def _as_dim_vector(value: float | Sequence[float], dims: int) -> np.ndarray:
@@ -106,9 +113,9 @@ def generate_offline_instance(cfg: Config, seed: int) -> Instance:
     dims = max(1, int(getattr(cfg.problem, "dimensions", 1)))
     capacities = _coerce_capacities(cfg, rng, N, dims)
 
-    # Bins (0..N-1). Fallback's "index" will be N (no capacity).
+    # Bins (0..N-1). Fallback uses index N when enabled.
     bins = [BinSpec(id=i, capacity=np.array(capacities[i], dtype=float)) for i in range(N)]
-    fallback_idx = N  # IMPORTANT: 0-based indexing, fallback is the (N)-th column
+    fallback_idx = N if cfg.problem.fallback_is_enabled else -1
 
     # Offline volumes ~ Beta(a, b)
     beta_params = _normalize_beta_params(cfg.volumes.offline_beta, dims)
@@ -123,22 +130,24 @@ def generate_offline_instance(cfg: Config, seed: int) -> Instance:
         offline_volumes[:, d] = (lo + u * (hi - lo)).astype(float)
     offline_items = [ItemSpec(id=j, volume=offline_volumes[j]) for j in range(M_off)]
 
-    # Feasibility mask for OFFLINE items: shape (M_off, N+1)
-    # Last column (fallback) is always feasible if fallback enabled; else 0.
+    # Feasibility mask for OFFLINE items: shape (M_off, N) or (M_off, N+1)
     p_off = cfg.graphs.p_off
     feas_mask = (rng.uniform(size=(M_off, N)) < p_off).astype(int)
     if cfg.problem.fallback_is_enabled:
         fallback_col = np.ones((M_off, 1), dtype=int)
+        feas_full = np.hstack([feas_mask, fallback_col])  # (M_off, N+1)
     else:
-        fallback_col = np.zeros((M_off, 1), dtype=int)
-    feas_full = np.hstack([feas_mask, fallback_col])  # (M_off, N+1)
+        feas_full = feas_mask  # (M_off, N)
     
     validate_mask(feas_full)
     
-    # Assignment costs for OFFLINE items to all N+1 bins (fallback very large)
+    # Assignment costs for OFFLINE items to all bins
     base_costs = _sample_assignment_costs(cfg, rng, M_off, N)
-    fallback_costs = np.full((M_off, 1), cfg.costs.huge_fallback, dtype=float)
-    assign = np.hstack([base_costs, fallback_costs])
+    if cfg.problem.fallback_is_enabled:
+        fallback_costs = np.full((M_off, 1), cfg.costs.huge_fallback, dtype=float)
+        assign = np.hstack([base_costs, fallback_costs])
+    else:
+        assign = base_costs
 
     # Infeasible edges get zeroed in feasibility mask (solver will enforce x[j,i]=0 later).
     costs = Costs(
@@ -201,7 +210,7 @@ def generate_online_sequence(
     Returns
     -------
     online_items: list of OnlineItem descriptors (ids start at M_off unless overridden)
-    online_feasible: FeasibleGraph with shape (M_on, N+1) and fallback column fixed to 0
+    online_feasible: FeasibleGraph with shape (M_on, N) or (M_on, N+1)
     """
     if cfg.stoch.horizon_dist != "fixed":
         raise NotImplementedError("Only fixed horizon is currently supported.")
@@ -212,8 +221,11 @@ def generate_online_sequence(
     base_mask = (rng.uniform(size=(M_on, N)) < cfg.graphs.p_onl).astype(int)
     _ensure_row_feasible(base_mask, rng)
 
-    fallback_col = np.zeros((M_on, 1), dtype=int)
-    feas_full = np.hstack([base_mask, fallback_col])
+    if cfg.problem.fallback_is_enabled:
+        fallback_col = np.zeros((M_on, 1), dtype=int)
+        feas_full = np.hstack([base_mask, fallback_col])
+    else:
+        feas_full = base_mask
     validate_mask(feas_full)
 
     volumes = _sample_online_volumes(cfg, rng, M_on) if M_on > 0 else np.empty((0, max(1, int(getattr(cfg.problem, "dimensions", 1)))), dtype=float)
@@ -222,10 +234,14 @@ def generate_online_sequence(
     online_items: List[OnlineItem] = []
     if M_on > 0:
         base_costs = _sample_assignment_costs(cfg, rng, M_on, N)
-        fallback_costs = np.full((M_on, 1), cfg.costs.huge_fallback, dtype=float)
-        assign = np.hstack([base_costs, fallback_costs])
+        if cfg.problem.fallback_is_enabled:
+            fallback_costs = np.full((M_on, 1), cfg.costs.huge_fallback, dtype=float)
+            assign = np.hstack([base_costs, fallback_costs])
+        else:
+            assign = base_costs
     else:
-        assign = np.empty((0, N + 1), dtype=float)
+        cols = N + 1 if cfg.problem.fallback_is_enabled else N
+        assign = np.empty((0, cols), dtype=float)
 
     for offset in range(M_on):
         feasible_bins = [int(bin_id) for bin_id in np.flatnonzero(base_mask[offset])]
@@ -300,3 +316,33 @@ def sample_online_item(
         feasible_bins = [int(rng.integers(0, N))]
 
     return next_id, vol, feasible_bins
+
+
+def generate_offline_milp_data(
+    cfg: Config,
+    seed: int,
+    *,
+    include_infeasible: bool = True,
+) -> Tuple[Instance, OfflineMILPData]:
+    """
+    Generate an offline instance together with its MILP data (c, A, b).
+    """
+    inst = generate_offline_instance(cfg, seed)
+    data = build_offline_milp_data(inst, cfg, include_infeasible=include_infeasible)
+    return inst, data
+
+
+def generate_instance_with_online_data(
+    cfg: Config,
+    seed: int,
+    *,
+    online_seed: Optional[int] = None,
+    horizon: Optional[int] = None,
+    include_infeasible: bool = True,
+) -> Tuple[Instance, OfflineMILPData]:
+    """
+    Generate a full instance (offline + online) plus offline MILP data.
+    """
+    inst = generate_instance_with_online(cfg, seed, online_seed=online_seed, horizon=horizon)
+    data = build_offline_milp_data(inst, cfg, include_infeasible=include_infeasible)
+    return inst, data

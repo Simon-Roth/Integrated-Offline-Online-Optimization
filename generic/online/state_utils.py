@@ -120,7 +120,7 @@ def add_to_bin(
         raise ValueError(f"Negative bin index {bin_id}")
     if bin_id < regular_bins:
         state.load[bin_id] += volume
-    elif bin_id == fallback_idx:
+    elif fallback_idx >= 0 and bin_id == fallback_idx:
         state.load[fallback_idx] += volume
     else:
         raise ValueError(
@@ -143,6 +143,8 @@ def remove_from_bin(
 def count_fallback_items(state: AssignmentState, instance: Instance) -> int:
     """Count how many items are currently assigned to the fallback bin."""
     fallback_idx = instance.fallback_bin_index
+    if fallback_idx < 0:
+        return 0
     return sum(
         1 for bin_id in state.assigned_bin.values() if bin_id >= fallback_idx
     )
@@ -211,7 +213,7 @@ def execute_placement(
     incremental_cost = 0.0
 
     def _current_load(bin_id: int) -> np.ndarray:
-        if bin_id == fallback_idx:
+        if fallback_idx >= 0 and bin_id == fallback_idx:
             return loads[fallback_idx]
         return loads[bin_id]
 
@@ -255,7 +257,7 @@ def execute_placement(
         if dest_bin is None:
             continue
 
-        if dest_bin == fallback_idx and not cfg.problem.fallback_is_enabled:
+        if dest_bin == fallback_idx and fallback_idx < 0:
             continue
 
         volume = ctx.offline_volumes.get(offline_id)
@@ -266,7 +268,7 @@ def execute_placement(
             if not vector_fits(loads[dest_bin], volume, dest_cap, TOLERANCE):
                 continue
         loads[target_bin] -= volume
-        if dest_bin == fallback_idx:
+        if dest_bin == fallback_idx and fallback_idx >= 0:
             loads[fallback_idx] += volume
         else:
             loads[dest_bin] += volume

@@ -19,7 +19,7 @@ class OfflineMILPSolver(GenericOfflineMILPSolver):
             from binpacking.offline.offline_heuristics.best_fit_decreasing import BestFitDecreasing
 
             heuristic = BestFitDecreasing(self.cfg)
-        elif heuristic_name == "CBFD":
+        elif heuristic_name == "CABFD":
             from binpacking.offline.offline_heuristics.cost_best_fit_decreasing import CostAwareBestFitDecreasing
 
             heuristic = CostAwareBestFitDecreasing(self.cfg)

@@ -35,7 +35,7 @@ class ItemSpec:
 class Costs:
     """
     Assignment and eviction costs.
-    - assign: (M_total x (N+1)) matrix; last column is fallback for OFFLINE only
+    - assign: (M_total x N) or (M_total x (N+1)); last column is fallback when enabled
     - reassignment_penalty: base penalty used when evicting an OFFLINE item
     - penalty_mode: 'per_item' or 'per_volume'
     - per_volume_scale: factor for per-volume penalty
@@ -52,9 +52,9 @@ class FeasibleGraph:
     """
     Feasibility mask for item-bin edges.
     - feasible[j, i] = 1 if item j is allowed in bin i; 0 otherwise.
-      For ONLINE items, the fallback column must be set to 0.
+      For ONLINE items, the fallback column must be 0 when fallback is enabled.
     """
-    feasible: np.ndarray  # shape (M_total, N+1)
+    feasible: np.ndarray  # shape (M_total, N) or (M_total, N+1)
 
 @dataclass
 class Instance:
@@ -64,9 +64,9 @@ class Instance:
     - offline_items: list of ItemSpec (length M_off)
     - costs: Costs
     - feasible: FeasibleGraph for OFFLINE items (G_off)
-    - fallback_bin_index: index == N (i.e., after N regular bins)
+    - fallback_bin_index: index == N (i.e., after N regular bins), or -1 if disabled
     - online_items: List of OnlineItem (length M_on)
-    - online_feasible: Optional feasible graph for online items (fallback column MUST be 0)
+    - online_feasible: Optional feasible graph for online items
     """
     bins: List[BinSpec]
     offline_items: List[ItemSpec]
@@ -101,7 +101,7 @@ class OnlineItem:
 class AssignmentState:
     """
     Current assignment state during the process/simulation.
-    - load: current load per bin (shape (N+1, d); fallback has no capacity limit)
+    - load: current load per bin (shape (N, d) or (N+1, d))
     - assigned_bin: mapping item -> bin index
     - offline_evicted: set of offline ids that were evicted at least once during online phase
     """
@@ -115,7 +115,7 @@ class Decision:
     Bookkeeping for a single online arrival 
     - placed_item: (item_id, bin_id_selected)
     - evicted_offline: list of (item_id, from_bin) that were evicted
-    - reassignments: list of (offline_item_id, fallback_bin)
+    - reassignments: list of (offline_item_id, fallback_bin) when fallback is enabled
     - incremental_cost: cost accrued by this decision
     """
     placed_item: Tuple[ItemId, BinId]

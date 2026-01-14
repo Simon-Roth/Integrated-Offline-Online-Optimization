@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import copy
 import numpy as np
-from typing import Callable, Dict, List
+from typing import Callable, List
 
 from generic.config import Config
-from binpacking.experiments.pipeline_runner import PipelineSpec
+from generic.experiments.pipeline import PipelineSpec
+from generic.experiments.registry import PipelineRegistry
 
 from binpacking.offline.offline_solver import OfflineMILPSolver
 from binpacking.offline.offline_heuristics.first_fit_decreasing import FirstFitDecreasing
@@ -214,15 +215,29 @@ PIPELINES: List[PipelineSpec] = [
         online_factory=lambda cfg, price_path=None: DynamicLearningPolicy(cfg, price_path=price_path) if price_path else DynamicLearningPolicy(cfg),
         offline_cache_key="UtilizationPriced",
     ),
+    PipelineSpec(
+        name="CABFD+PrimalDual",
+        offline_label="CABFD",
+        online_label="PrimalDual",
+        offline_factory=lambda cfg: CostAwareBestFitDecreasing(cfg),
+        online_factory=lambda cfg, price_path=None: PrimalDualPolicy(cfg, price_path=price_path) if price_path else PrimalDualPolicy(cfg),       
+        offline_cache_key="CABFD",
+    ),
+    PipelineSpec(
+        name="CABFD+CostAwareBestFit",
+        offline_label="CABFD",
+        online_label="CostAwareBestFit",
+        offline_factory=lambda cfg: CostAwareBestFitDecreasing(cfg),
+        online_factory=lambda cfg: CostAwareBestFitOnlinePolicy(cfg),
+        offline_cache_key="CABFD",
+    ),
     
 ]
 
-PIPELINE_REGISTRY: Dict[str, PipelineSpec] = {spec.name: spec for spec in PIPELINES}
+PIPELINE_REGISTRY = PipelineRegistry()
+for spec in PIPELINES:
+    PIPELINE_REGISTRY.register(spec)
 
 
 def get_pipeline(spec_name: str) -> PipelineSpec:
-    try:
-        return PIPELINE_REGISTRY[spec_name]
-    except KeyError as exc:
-        known = ", ".join(sorted(PIPELINE_REGISTRY))
-        raise KeyError(f"Unknown pipeline '{spec_name}'. Known pipelines: {known}") from exc
+    return PIPELINE_REGISTRY.get(spec_name)

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable, Optional, Tuple
+from typing import Optional, Tuple
 import copy
 
 from generic.config import Config
+from generic.experiments.pipeline import PipelineSpec
 from binpacking.experiments.utils import (
     build_pipeline_summary,
     save_combined_result,
@@ -14,41 +14,10 @@ from pathlib import Path
 from generic.online.online_solver import OnlineSolver
 from binpacking.online.prices import compute_prices
 from generic.online.state_utils import count_fallback_items
-from binpacking.data.generators import generate_instance_with_online
+from binpacking.data.instance_generators import generate_instance_with_online
 from generic.models import AssignmentState, Instance
 from generic.offline.models import OfflineSolutionInfo
 from generic.online.models import OnlineSolutionInfo
-
-
-OfflineFactory = Callable[[Config], object]
-OnlineFactory = Callable[[Config], object]
-
-
-@dataclass(frozen=True)
-class PipelineSpec:
-    """
-    Lightweight description of an offline+online experiment.
-
-    Attributes
-    ----------
-    name:
-        Display name for logs / JSON summary.
-    offline_label:
-        Label stored in the JSON for the offline component.
-    online_label:
-        Label stored in the JSON for the online component.
-    offline_factory:
-        Callable that returns a solver/heuristic with a ``solve(instance)`` method.
-    online_factory:
-        Callable that returns a policy implementing ``select_bin(...)``.
-    """
-
-    name: str
-    offline_label: str
-    online_label: str
-    offline_factory: OfflineFactory
-    online_factory: OnlineFactory
-    offline_cache_key: str | None = None
 
 
 def run_pipeline(

@@ -16,7 +16,10 @@ class ProblemConfig:
     - dimensions: number of dimensions for capacities/volumes
     - capacities: list of bin capacities (len == N) (optional if using distribution)
     - capacity_mean/std: parameters to synthesize capacities when list shorter than N
-    - fallback_is_enabled: always True for OFFLINE items; ONLINE must NOT use fallback
+    - fallback_is_enabled: if False, no fallback bin exists in the instance
+    - binpacking: enable binpacking-specific logic (evictions, fallback tracking)
+    - fallback_capacity_offline: fallback bin capacity for offline MILP (scalar or per-dim)
+    - fallback_capacity_online: fallback capacity placeholder for online (scalar or per-dim)
     """
     N: int
     M_off: int
@@ -25,6 +28,9 @@ class ProblemConfig:
     capacity_mean: float = 1.0
     capacity_std: float = 0.1
     fallback_is_enabled: bool = True
+    binpacking: bool = True
+    fallback_capacity_offline: float | List[float] = 1e6
+    fallback_capacity_online: float | List[float] = 1e6
 
 @dataclass
 class VolumeGenerationConfig:

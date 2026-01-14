@@ -9,7 +9,7 @@ from generic.models import AssignmentState
 from binpacking.experiments.pipeline_runner import run_pipeline
 from binpacking.experiments.pipeline_registry import PIPELINES
 
-from binpacking.data.generators import generate_instance_with_online
+from binpacking.data.instance_generators import generate_instance_with_online
 from binpacking.experiments.optimal_benchmark import solve_full_horizon_optimum
 from generic.online.state_utils import count_fallback_items
 from binpacking.experiments.utils import save_combined_result
