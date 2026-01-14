@@ -98,13 +98,12 @@ def _build_run_summary(
         "offline": {
             "status": offline_info.status,
             "objective": float(offline_info.obj_value),
-            "mip_gap": float(offline_info.mip_gap),
             "runtime": float(offline_info.runtime),
             "fallback_items": int(offline_fallback),
         },
         "online": {
             "status": online_info.status,
-            "total_cost": float(online_info.total_cost),
+            "objective": float(online_info.total_cost),
             "runtime": float(online_info.runtime),
             "fallback_items": int(online_info.fallback_items),
             "evicted_offline": int(online_info.evicted_offline),
@@ -133,17 +132,21 @@ def run_eval(
     for seed in seeds:
         set_global_seed(seed)
         instance = generate_instance_with_online(cfg, seed=seed, horizon=horizon)
-        data = build_offline_milp_data(instance, cfg, include_infeasible=True)
-
         offline_solver = offline_solver_cls(cfg)
-        warm_start = None
-        if getattr(cfg.solver, "use_warm_start", False) and hasattr(
-            offline_solver, "_generate_warm_start"
-        ):
-            warm_start = offline_solver._generate_warm_start(instance)
-        offline_state, offline_info = offline_solver.solve_from_data(
-            data, warm_start=warm_start
-        )
+        # the following check is here because we have some binpacking specific offline algos here in the generic/pipeline_registry.py
+        # these do not have a solve_from_data method (working just on A,b,c) but work on instance (volumes, capacities, ...) for simplicity and understanding
+        if hasattr(offline_solver, "solve_from_data"):
+            data = build_offline_milp_data(instance, cfg)
+            warm_start = None
+            if getattr(cfg.solver, "use_warm_start", False) and hasattr(
+                offline_solver, "_generate_warm_start"
+            ):
+                warm_start = offline_solver._generate_warm_start(instance)
+            offline_state, offline_info = offline_solver.solve_from_data(
+                data, warm_start=warm_start
+            )
+        else:
+            offline_state, offline_info = offline_solver.solve(instance)
 
         online_policy = online_policy_cls(cfg)
         online_solver = OnlineSolver(cfg, online_policy)
@@ -166,9 +169,9 @@ def run_eval(
 
     offline_obj = [run["offline"]["objective"] for run in runs]
     offline_runtime = [run["offline"]["runtime"] for run in runs]
-    offline_gap = [run["offline"]["mip_gap"] for run in runs]
-    online_cost = [run["online"]["total_cost"] for run in runs]
+    online_obj = [run["online"]["objective"] for run in runs]
     online_runtime = [run["online"]["runtime"] for run in runs]
+    total_obj = [off + on for off, on in zip(offline_obj, online_obj)]
     offline_fail_statuses = {"INFEASIBLE", "INF_OR_UNBD", "UNBOUNDED"}
     online_fail_statuses = {"INFEASIBLE"}
     offline_failures = sum(
@@ -177,16 +180,25 @@ def run_eval(
     online_failures = sum(
         1 for run in runs if run["online"]["status"] in online_fail_statuses
     )
+    offline_statuses: Dict[str, int] = {}
+    online_statuses: Dict[str, int] = {}
+    for run in runs:
+        offline_status = run["offline"]["status"]
+        online_status = run["online"]["status"]
+        offline_statuses[offline_status] = offline_statuses.get(offline_status, 0) + 1
+        online_statuses[online_status] = online_statuses.get(online_status, 0) + 1
 
     summary = {
         "seed_count": len(seeds),
         "offline_solver": offline_solver_name,
         "online_policy": online_policy_name,
+        "offline_statuses": offline_statuses,
+        "online_statuses": online_statuses,
+        "total_objective_mean": _mean(total_obj),
         "aggregate": {
             "offline_objective_mean": _mean(offline_obj),
             "offline_runtime_mean": _mean(offline_runtime),
-            "offline_mip_gap_mean": _mean(offline_gap),
-            "online_total_cost_mean": _mean(online_cost),
+            "online_objective_mean": _mean(online_obj),
             "online_runtime_mean": _mean(online_runtime),
             "offline_failures": int(offline_failures),
             "online_failures": int(online_failures),
@@ -202,6 +214,9 @@ def main() -> None:
 
     offline_solver_cls = _import_symbol(args.offline_solver)
     online_policy_cls = _import_symbol(args.online_policy)
+
+    # if you run an online policy like primal dual here, be sure to compute prices beforehand
+    # prices are only computed manually in run_multiple_evals.py each time a pipeline needs them
 
     summary = run_eval(
         cfg,

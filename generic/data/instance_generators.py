@@ -321,14 +321,12 @@ def sample_online_item(
 def generate_offline_milp_data(
     cfg: Config,
     seed: int,
-    *,
-    include_infeasible: bool = True,
 ) -> Tuple[Instance, OfflineMILPData]:
     """
     Generate an offline instance together with its MILP data (c, A, b).
     """
     inst = generate_offline_instance(cfg, seed)
-    data = build_offline_milp_data(inst, cfg, include_infeasible=include_infeasible)
+    data = build_offline_milp_data(inst, cfg)
     return inst, data
 
 
@@ -338,11 +336,10 @@ def generate_instance_with_online_data(
     *,
     online_seed: Optional[int] = None,
     horizon: Optional[int] = None,
-    include_infeasible: bool = True,
 ) -> Tuple[Instance, OfflineMILPData]:
     """
     Generate a full instance (offline + online) plus offline MILP data.
     """
     inst = generate_instance_with_online(cfg, seed, online_seed=online_seed, horizon=horizon)
-    data = build_offline_milp_data(inst, cfg, include_infeasible=include_infeasible)
+    data = build_offline_milp_data(inst, cfg)
     return inst, data

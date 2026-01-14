@@ -60,7 +60,7 @@ class OfflineMILPSolver:
         """
         Modell bauen, lösen, Lösung extrahieren.
         """
-        data = build_offline_milp_data(inst, self.cfg, include_infeasible=True)
+        data = build_offline_milp_data(inst, self.cfg)
 
         # Generate warm start if not provided but config requests it.
         if warm_start is None and self.cfg.solver.use_warm_start:
@@ -189,10 +189,10 @@ class OfflineMILPSolver:
         )
 
         info = OfflineSolutionInfo(
+            algorithm=self.__class__.__name__,
             status=status_name,
             obj_value=float(m.ObjVal) if has_solution else float("inf"),
-            mip_gap=float(m.MIPGap) if has_solution else float("inf"),
             runtime=float(m.Runtime),
-            assignments=x_sol,
+            feasible=bool(has_solution),
         )
         return state, info

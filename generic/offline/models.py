@@ -1,16 +1,14 @@
 from dataclasses import dataclass
-import numpy as np
-import gurobipy as gp
 from gurobipy import GRB
 
 @dataclass
 class OfflineSolutionInfo:
-    """Lightweight summary of the MILP solve for logging/eval."""
+    """Lightweight summary of the offline solve for logging/eval."""
+    algorithm: str
     status: str
     obj_value: float
-    mip_gap: float
     runtime: float
-    assignments: np.ndarray  # shape: (M_off, N) or (M_off, N+1)
+    feasible: bool
 
 
 def _status_name(code: int) -> str:

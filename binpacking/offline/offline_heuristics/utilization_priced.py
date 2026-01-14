@@ -9,7 +9,7 @@ import numpy as np
 from generic.general_utils import effective_capacity, scalarize_vector, vector_fits, residual_vector
 from generic.models import AssignmentState, Instance
 from generic.offline.offline_policies import BaseOfflinePolicy
-from binpacking.offline.offline_heuristics.core import HeuristicSolutionInfo
+from generic.offline.models import OfflineSolutionInfo
 
 
 class UtilizationPricedDecreasing(BaseOfflinePolicy):
@@ -27,7 +27,7 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
         self.price_exponent = price_exponent if price_exponent is not None else cfg.util_pricing.price_exponent
         self.exp_rate = exp_rate if exp_rate is not None else cfg.util_pricing.exp_rate
 
-    def solve(self, inst: Instance) -> Tuple[AssignmentState, HeuristicSolutionInfo]:
+    def solve(self, inst: Instance) -> Tuple[AssignmentState, OfflineSolutionInfo]:
         start_time = time.perf_counter()
 
         size_key = self.cfg.heuristics.size_key
@@ -116,24 +116,12 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
             assigned_bin=assigned_bin,
             offline_evicted=set(),
         )
-        utilization = float(
-            np.mean(
-                [
-                    np.max(loads[i] / inst.bins[i].capacity)
-                    for i in range(len(inst.bins))
-                ]
-            )
-        )
-
-        info = HeuristicSolutionInfo(
+        info = OfflineSolutionInfo(
             algorithm="UtilizationPricedDecreasing",
+            status="FEASIBLE",
             runtime=runtime,
             obj_value=obj_value,
             feasible=True,
-            items_in_fallback=sum(
-                1 for bin_id in assigned_bin.values() if bin_id == fallback_idx
-            ),
-            utilization=utilization,
         )
         return state, info
 

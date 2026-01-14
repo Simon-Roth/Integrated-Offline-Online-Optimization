@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Dict, Optional, List, Callable
 
 import numpy as np
@@ -16,9 +17,23 @@ from generic.models import (
     OnlineItem,
     Decision,
 )
-from generic.online.models import PlacementContext
-
 TOLERANCE = 1e-9
+
+
+@dataclass
+class PlacementContext:
+    """
+    Lightweight simulation context used by online heuristics while planning.
+    Mutations to `loads` and `assignments` affect only the context copy; the
+    actual AssignmentState is updated later via `apply_decision`.
+    """
+
+    cfg: Config
+    instance: Instance
+    loads: np.ndarray
+    assignments: Dict[int, int]
+    effective_caps: np.ndarray
+    offline_volumes: Dict[int, np.ndarray]
 
 
 

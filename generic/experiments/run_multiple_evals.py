@@ -13,6 +13,7 @@ from generic.experiments.pipeline_registry import (
     default_registry,
     online_policy_needs_prices,
 )
+from generic.experiments.optimal_benchmark import run_optimal_benchmark
 from generic.experiments.run_eval import run_eval
 from generic.data.instance_generators import generate_instance_with_online
 from generic.data.offline_milp_assembly import build_offline_milp_data
@@ -59,6 +60,11 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional override for the number of online items.",
     )
+    parser.add_argument(
+        "--compute-optimal",
+        action="store_true",
+        help="Compute a full-horizon optimal benchmark once per seed and attach it to each summary.",
+    )
     return parser.parse_args()
 
 
@@ -84,6 +90,16 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
+    optimal_summary = None
+    if args.compute_optimal:
+        optimal_summary = run_optimal_benchmark(
+            cfg,
+            seeds=seeds,
+            horizon=args.horizon,
+        )
+        optimal_path = output_dir / f"optimal_full_horizon_{timestamp}.json"
+        optimal_path.write_text(json.dumps(optimal_summary, indent=2))
+        print(f"Wrote optimal_full_horizon -> {optimal_path}")
 
     for spec in specs:
         offline_solver_cls = _import_symbol(spec.offline_solver)
@@ -94,7 +110,7 @@ def main() -> None:
 
             seed_for_prices = seeds[0] if seeds else cfg.eval.seeds[0]
             price_instance = generate_instance_with_online(cfg, seed=seed_for_prices, horizon=args.horizon)
-            price_data = build_offline_milp_data(price_instance, cfg, include_infeasible=True)
+            price_data = build_offline_milp_data(price_instance, cfg)
             price_solver = GenericOfflineMILPSolver(cfg)
             price_state, _ = price_solver.solve_from_data(price_data)
             price_path = Path("binpacking/results/primal_dual.json")

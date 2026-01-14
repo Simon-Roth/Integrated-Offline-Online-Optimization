@@ -1,12 +1,11 @@
 from __future__ import annotations
 import numpy as np
 from typing import Dict, List, Tuple
-from dataclasses import dataclass
 
 from generic.models import Instance, AssignmentState
 from generic.offline.offline_policies import BaseOfflinePolicy
 from generic.general_utils import effective_capacity, scalarize_vector, vector_fits
-from binpacking.offline.offline_heuristics.core import HeuristicSolutionInfo
+from generic.offline.models import OfflineSolutionInfo
 
 class FirstFitDecreasing(BaseOfflinePolicy):
     """First-Fit Decreasing heuristic for bin packing"""
@@ -14,7 +13,7 @@ class FirstFitDecreasing(BaseOfflinePolicy):
     def __init__(self, cfg):
         self.cfg = cfg
     
-    def solve(self, inst: Instance) -> Tuple[AssignmentState, HeuristicSolutionInfo]:
+    def solve(self, inst: Instance) -> Tuple[AssignmentState, OfflineSolutionInfo]:
         """Solve using First-Fit Decreasing"""
         import time
         start_time = time.perf_counter()
@@ -84,21 +83,12 @@ class FirstFitDecreasing(BaseOfflinePolicy):
             offline_evicted=set()
         )
         
-        info = HeuristicSolutionInfo(
+        info = OfflineSolutionInfo(
             algorithm="First-Fit Decreasing",
+            status="FEASIBLE",
             runtime=runtime,
             obj_value=obj_value,
             feasible=True,
-            items_in_fallback=sum(1 for bin_id in assigned_bin.values() 
-                                if bin_id == len(inst.bins)),
-            utilization=float(
-                np.mean(
-                    [
-                        np.max(loads[i] / inst.bins[i].capacity)
-                        for i in range(len(inst.bins))
-                    ]
-                )
-            ),
         )
         
         return state, info

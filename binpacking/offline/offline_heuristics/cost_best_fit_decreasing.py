@@ -8,7 +8,7 @@ import numpy as np
 from generic.general_utils import effective_capacity, scalarize_vector, vector_fits, residual_vector
 from generic.models import AssignmentState, Instance
 from generic.offline.offline_policies import BaseOfflinePolicy
-from binpacking.offline.offline_heuristics.core import HeuristicSolutionInfo
+from generic.offline.models import OfflineSolutionInfo
 
 
 class CostAwareBestFitDecreasing(BaseOfflinePolicy):
@@ -21,7 +21,7 @@ class CostAwareBestFitDecreasing(BaseOfflinePolicy):
     def __init__(self, cfg) -> None:
         self.cfg = cfg
 
-    def solve(self, inst: Instance) -> Tuple[AssignmentState, HeuristicSolutionInfo]:
+    def solve(self, inst: Instance) -> Tuple[AssignmentState, OfflineSolutionInfo]:
         start_time = time.perf_counter()
 
         size_key = self.cfg.heuristics.size_key
@@ -90,24 +90,12 @@ class CostAwareBestFitDecreasing(BaseOfflinePolicy):
             assigned_bin=assigned_bin,
             offline_evicted=set(),
         )
-        utilization = float(
-            np.mean(
-                [
-                    np.max(loads[i] / inst.bins[i].capacity)
-                    for i in range(len(inst.bins))
-                ]
-            )
-        )
-
-        info = HeuristicSolutionInfo(
+        info = OfflineSolutionInfo(
             algorithm="CostAwareBestFitDecreasing",
+            status="FEASIBLE",
             runtime=runtime,
             obj_value=obj_value,
             feasible=True,
-            items_in_fallback=sum(
-                1 for bin_id in assigned_bin.values() if bin_id == fallback_idx
-            ),
-            utilization=utilization,
         )
         return state, info
 

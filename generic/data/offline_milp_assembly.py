@@ -44,7 +44,6 @@ def build_offline_milp_data_from_arrays(
     fallback_capacity: float | Sequence[float],
     slack_enforce: bool,
     slack_fraction: float,
-    include_infeasible: bool = True,
 ) -> OfflineMILPData:
     """
     Build offline MILP data from raw arrays. Independent of instance generation.
@@ -132,17 +131,16 @@ def build_offline_milp_data_from_arrays(
         rhs.append(-1.0)
 
     # Feasibility constraints (sum of infeasible edges == 0).
-    if include_infeasible:
-        for j in range(M):
-            infeas_idx = np.flatnonzero(feas[j] == 0)
-            if infeas_idx.size == 0:
-                continue
-            row = np.zeros(num_vars, dtype=float)
-            start = j * cols
-            for i in infeas_idx:
-                row[start + i] = 1.0
-            rows.append(row)
-            rhs.append(0.0)
+    for j in range(M):
+        infeas_idx = np.flatnonzero(feas[j] == 0)
+        if infeas_idx.size == 0:
+            continue
+        row = np.zeros(num_vars, dtype=float)
+        start = j * cols
+        for i in infeas_idx:
+            row[start + i] = 1.0
+        rows.append(row)
+        rhs.append(0.0)
 
     A = np.vstack(rows) if rows else np.empty((0, num_vars), dtype=float)
     b = np.asarray(rhs, dtype=float)
@@ -163,8 +161,6 @@ def build_offline_milp_data_from_arrays(
 def build_offline_milp_data(
     inst: Instance,
     cfg: Config,
-    *,
-    include_infeasible: bool = True,
 ) -> OfflineMILPData:
     """
     Convenience wrapper that assembles MILP data from an Instance + Config.
@@ -182,5 +178,4 @@ def build_offline_milp_data(
         fallback_capacity=cfg.problem.fallback_capacity_offline,
         slack_enforce=cfg.slack.enforce_slack,
         slack_fraction=cfg.slack.fraction,
-        include_infeasible=include_infeasible,
     )
