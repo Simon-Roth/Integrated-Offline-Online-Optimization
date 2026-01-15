@@ -69,7 +69,6 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         # Update prices if a phase boundary was reached after the last item.
         self._maybe_update_prices(state, instance)
 
-        ctx: PlacementContext = build_context(self.cfg, instance, state)
         candidate_bins = self._candidate_bins(item, instance, feasible_row)
         if not candidate_bins:
             raise PolicyInfeasibleError(f"No feasible regular bin for online item {item.id}")
@@ -79,6 +78,7 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
 
         # First, try to place without evictions.
         for bin_id in candidate_bins:
+            ctx: PlacementContext = build_context(self.cfg, instance, state)
             if not vector_fits(ctx.loads[bin_id], item.volume, ctx.effective_caps[bin_id], TOLERANCE):
                 continue
 
@@ -104,6 +104,7 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
 
         # Allow evictions if no feasible bin remained.
         for bin_id in candidate_bins:
+            ctx: PlacementContext = build_context(self.cfg, instance, state)
             score = self._score(bin_id, item, instance)
             if score >= best_score - 1e-12:
                 continue
@@ -209,12 +210,14 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         # Residual after offline load only (online load is modeled by LP vars).
         residual = caps_scaled
 
+        allow_fallback = self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_online
         x = {}
         y_fallback = {}
         for item in observed:
             for i in item.feasible_bins:
                 x[(item.id, i)] = m.addVar(lb=0.0, ub=1.0, name=f"x_{item.id}_{i}")
-            y_fallback[item.id] = m.addVar(lb=0.0, ub=1.0, name=f"y_fallback_{item.id}")
+            if allow_fallback:
+                y_fallback[item.id] = m.addVar(lb=0.0, ub=1.0, name=f"y_fallback_{item.id}")
         m.update()
 
         cap_constr: Dict[tuple[int, int], gp.Constr] = {}
@@ -229,12 +232,15 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
 
         for item in observed:
             item_vars = [var for (j, i), var in x.items() if j == item.id]
-            expr = gp.quicksum(item_vars) + y_fallback[item.id]
+            expr = gp.quicksum(item_vars)
+            if allow_fallback:
+                expr += y_fallback[item.id]
             m.addConstr(expr == 1.0, name=f"assign_{item.id}")
 
-        fallback_cost = self.cfg.costs.huge_fallback
-        obj = gp.quicksum(instance.costs.assign[j, i] * var for (j, i), var in x.items())
-        obj += gp.quicksum(fallback_cost * y for y in y_fallback.values())
+        obj = gp.quicksum(instance.costs.assignment_costs[j, i] * var for (j, i), var in x.items())
+        if allow_fallback:
+            fallback_cost = self.cfg.costs.huge_fallback
+            obj += gp.quicksum(fallback_cost * y for y in y_fallback.values())
         m.setObjective(obj, GRB.MINIMIZE)
 
         m.optimize()
@@ -293,7 +299,7 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         return sorted(b for b in candidate_bins if 0 <= b < regular_bins)
 
     def _score(self, bin_id: int, item: OnlineItem, instance: Instance) -> float:
-        c_ji = float(instance.costs.assign[item.id, bin_id])
+        c_ji = float(instance.costs.assignment_costs[item.id, bin_id])
         lam_i = self._current_prices.get(bin_id, np.zeros_like(item.volume))
         if self.cfg.util_pricing.vector_prices:
             return c_ji + float(np.dot(lam_i, item.volume))
@@ -327,7 +333,7 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         zero_vec = np.zeros_like(ctx.effective_caps[0])
         volume = ctx.offline_volumes.get(offline_id, zero_vec)
         instance = ctx.instance
-        feasible_row = instance.feasible.feasible[offline_id]
+        feasible_row = instance.offline_feasible.feasible[offline_id]
         regular_bins = len(instance.bins)
         fallback_idx = instance.fallback_bin_index
 
@@ -341,7 +347,7 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
             residual_vec = residual_vector(ctx.loads[candidate], volume, ctx.effective_caps[candidate])
             if not vector_fits(ctx.loads[candidate], volume, ctx.effective_caps[candidate], TOLERANCE):
                 continue
-            cost = instance.costs.assign[offline_id, candidate]
+            cost = instance.costs.assignment_costs[offline_id, candidate]
             residual_score = scalarize_vector(residual_vec, self.cfg.heuristics.residual_scalarization)
             if cost < best_cost - 1e-9 or (
                 abs(cost - best_cost) <= 1e-9 and residual_score < best_residual
@@ -354,7 +360,7 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
             return best_candidate
 
         if (
-            self.cfg.problem.fallback_is_enabled
+            self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
             and fallback_idx < feasible_row.shape[0]
             and feasible_row[fallback_idx] == 1
         ):

@@ -48,7 +48,7 @@ class BestFitDecreasing(BaseOfflinePolicy):
             # Find best-fitting bin (minimum remaining space)
             for bin_idx in range(len(inst.bins)):
                 if (
-                    inst.feasible.feasible[item_idx, bin_idx] == 1
+                    inst.offline_feasible.feasible[item_idx, bin_idx] == 1
                     and vector_fits(loads[bin_idx], item.volume, eff_caps[bin_idx])
                 ):
                     remaining = residual_vector(loads[bin_idx], item.volume, eff_caps[bin_idx])
@@ -62,8 +62,8 @@ class BestFitDecreasing(BaseOfflinePolicy):
                 loads[best_bin] += item.volume
                 assigned_bin[item_idx] = best_bin
             elif (
-                self.cfg.problem.fallback_is_enabled
-                and inst.feasible.feasible[item_idx, len(inst.bins)] == 1
+                self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
+                and inst.offline_feasible.feasible[item_idx, len(inst.bins)] == 1
             ):
                 fallback_idx = len(inst.bins)
                 loads[fallback_idx] += item.volume
@@ -96,7 +96,7 @@ class BestFitDecreasing(BaseOfflinePolicy):
         total_cost = 0.0
         for item_idx, bin_idx in assigned_bin.items():
             if bin_idx < len(inst.bins):  # Regular bin
-                total_cost += inst.costs.assign[item_idx, bin_idx]
+                total_cost += inst.costs.assignment_costs[item_idx, bin_idx]
             else:  # Fallback bin
                 total_cost += inst.costs.huge_fallback
         return total_cost

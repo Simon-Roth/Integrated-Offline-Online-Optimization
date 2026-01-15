@@ -18,7 +18,7 @@ def compute_prices(
     log_to_console: bool = False,
 ) -> dict[int, float | list[float]]:
     """
-    1) Solve the OFFLINE MILP on the given instance to get residual capacities.
+    1) Take the offline state and compute the residual problem
     2) Build a fractional LP for ONLINE items only (regular bins 0..N-1).
     3) Minimize assignment cost; read duals Pi of cap constraints as λ_i.
     4) Save to JSON and return {bin_i: lambda_i}.
@@ -40,6 +40,7 @@ def compute_prices(
     m = gp.Model("online_fractional_pricing")
     m.Params.OutputFlag = 1 if log_to_console else 0
 
+    allow_fallback = cfg.problem.fallback_is_enabled and cfg.problem.fallback_allowed_online
     # Variables x[j,i] for feasible regular bins and y[j] for fallback usage
     x = {}
     y_fallback = {}
@@ -47,7 +48,8 @@ def compute_prices(
     for item in inst.online_items:
         for i in item.feasible_bins:   # regular bins only
             x[(item.id, i)] = m.addVar(lb=0.0, ub=1.0, name=f"x_{item.id}_{i}")
-        y_fallback[item.id] = m.addVar(lb=0.0, ub=1.0, name=f"y_fallback_{item.id}")
+        if allow_fallback:
+            y_fallback[item.id] = m.addVar(lb=0.0, ub=1.0, name=f"y_fallback_{item.id}")
     m.update()
     
     # Bin capacities (residual)
@@ -63,13 +65,16 @@ def compute_prices(
     # Assignment equality per online item: either use regular capacity or fallback slack.
     for item in inst.online_items:
         item_vars = [var for (j, i), var in x.items() if j == item.id]
-        expr = gp.quicksum(item_vars) + y_fallback[item.id]
+        expr = gp.quicksum(item_vars)
+        if allow_fallback:
+            expr += y_fallback[item.id]
         m.addConstr(expr == 1.0, name=f"assign_{item.id}")
 
     # Objective: minimize ONLINE assignment cost
-    fallback_cost = cfg.costs.huge_fallback
-    obj = gp.quicksum(inst.costs.assign[j, i] * var for (j, i), var in x.items())
-    obj += gp.quicksum(fallback_cost * y for y in y_fallback.values())
+    obj = gp.quicksum(inst.costs.assignment_costs[j, i] * var for (j, i), var in x.items())
+    if allow_fallback:
+        fallback_cost = cfg.costs.huge_fallback
+        obj += gp.quicksum(fallback_cost * y for y in y_fallback.values())
     m.setObjective(obj, GRB.MINIMIZE)
 
     m.optimize()

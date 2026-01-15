@@ -166,8 +166,8 @@ def build_offline_milp_data(
     Convenience wrapper that assembles MILP data from an Instance + Config.
     """
     volumes = np.array([it.volume for it in inst.offline_items], dtype=float)
-    costs = np.asarray(inst.costs.assign[: len(inst.offline_items), :], dtype=float)
-    feasible = np.asarray(inst.feasible.feasible[: len(inst.offline_items), :], dtype=int)
+    costs = np.asarray(inst.costs.assignment_costs[: len(inst.offline_items), :], dtype=float)
+    feasible = np.asarray(inst.offline_feasible.feasible[: len(inst.offline_items), :], dtype=int)
     capacities = np.asarray([b.capacity for b in inst.bins], dtype=float)
     return build_offline_milp_data_from_arrays(
         volumes=volumes,

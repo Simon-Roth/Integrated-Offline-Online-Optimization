@@ -16,8 +16,8 @@ class OnlineSolutionInfo:
         Run outcome string (e.g. 'COMPLETED', 'NO_ITEMS', 'ERROR').
     runtime:
         Wall-clock duration of the online decision loop.
-    total_cost:
-        Sum of incremental costs reported by the policy.
+    total_objective:
+        Sum of incremental objective contributions reported by the policy.
     fallback_items:
         Number of items assigned to the fallback bin after the online phase (0 if disabled).
     evicted_offline:
@@ -28,7 +28,7 @@ class OnlineSolutionInfo:
 
     status: str
     runtime: float
-    total_cost: float
+    total_objective: float
     fallback_items: int
     evicted_offline: int
     decisions: List[Decision] = field(default_factory=list)

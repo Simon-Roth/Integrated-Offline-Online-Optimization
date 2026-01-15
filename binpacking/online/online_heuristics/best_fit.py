@@ -122,7 +122,7 @@ class BestFitOnlinePolicy(BaseOnlinePolicy):
         zero_vec = np.zeros_like(ctx.effective_caps[0])
         volume = ctx.offline_volumes.get(offline_id, zero_vec)
         instance = ctx.instance
-        feasible_row = instance.feasible.feasible[offline_id]
+        feasible_row = instance.offline_feasible.feasible[offline_id]
         regular_bins = len(instance.bins)
         fallback_idx = instance.fallback_bin_index
 
@@ -142,7 +142,7 @@ class BestFitOnlinePolicy(BaseOnlinePolicy):
             return best_candidate
 
         if (
-            self.cfg.problem.fallback_is_enabled
+            self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
             and fallback_idx < feasible_row.shape[0]
             and feasible_row[fallback_idx] == 1
         ):

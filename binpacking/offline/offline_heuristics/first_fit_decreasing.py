@@ -49,7 +49,7 @@ class FirstFitDecreasing(BaseOfflinePolicy):
             for bin_idx in range(len(inst.bins)):
                 # Check feasibility and capacity
                 if (
-                    inst.feasible.feasible[item_idx, bin_idx] == 1
+                    inst.offline_feasible.feasible[item_idx, bin_idx] == 1
                     and vector_fits(loads[bin_idx], item.volume, eff_caps[bin_idx])
                 ):
                     
@@ -62,8 +62,8 @@ class FirstFitDecreasing(BaseOfflinePolicy):
             if not assigned:
                 fallback_idx = len(inst.bins)
                 if (
-                    self.cfg.problem.fallback_is_enabled
-                    and inst.feasible.feasible[item_idx, fallback_idx] == 1
+                    self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
+                    and inst.offline_feasible.feasible[item_idx, fallback_idx] == 1
                 ):
                     fallback_idx = len(inst.bins)
                     loads[fallback_idx] += item.volume
@@ -98,7 +98,7 @@ class FirstFitDecreasing(BaseOfflinePolicy):
         total_cost = 0.0
         for item_idx, bin_idx in assigned_bin.items():
             if bin_idx < len(inst.bins):  # Regular bin
-                total_cost += inst.costs.assign[item_idx, bin_idx]
+                total_cost += inst.costs.assignment_costs[item_idx, bin_idx]
             else:  # Fallback bin
                 total_cost += inst.costs.huge_fallback
         return total_cost

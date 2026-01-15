@@ -52,11 +52,11 @@ class CostAwareBestFitDecreasing(BaseOfflinePolicy):
             best_residual = float("inf")
 
             for bin_idx in range(regular_bins):
-                if inst.feasible.feasible[item_idx, bin_idx] != 1:
+                if inst.offline_feasible.feasible[item_idx, bin_idx] != 1:
                     continue
                 if not vector_fits(loads[bin_idx], volume, eff_caps[bin_idx], 1e-9):
                     continue
-                cost = float(inst.costs.assign[item_idx, bin_idx])
+                cost = float(inst.costs.assignment_costs[item_idx, bin_idx])
                 residual = residual_vector(loads[bin_idx], volume, eff_caps[bin_idx])
                 residual_score = scalarize_vector(residual, self.cfg.heuristics.residual_scalarization)
                 if (
@@ -73,8 +73,8 @@ class CostAwareBestFitDecreasing(BaseOfflinePolicy):
                 continue
 
             if (
-                self.cfg.problem.fallback_is_enabled
-                and inst.feasible.feasible[item_idx, fallback_idx] == 1
+                self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
+                and inst.offline_feasible.feasible[item_idx, fallback_idx] == 1
             ):
                 loads[fallback_idx] += volume
                 assigned_bin[item_idx] = fallback_idx
@@ -106,7 +106,7 @@ class CostAwareBestFitDecreasing(BaseOfflinePolicy):
         fallback_idx = len(inst.bins)
         for item_idx, bin_idx in assigned_bin.items():
             if bin_idx < fallback_idx:
-                total_cost += float(inst.costs.assign[item_idx, bin_idx])
+                total_cost += float(inst.costs.assignment_costs[item_idx, bin_idx])
             else:
                 total_cost += inst.costs.huge_fallback
         return total_cost

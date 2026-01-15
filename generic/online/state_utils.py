@@ -238,7 +238,7 @@ def execute_placement(
     if vector_fits(_current_load(target_bin), required_volume, capacity, TOLERANCE):
         # No eviction needed, simply reserve the space and pay assignment cost.
         loads[target_bin] += required_volume
-        assignment_cost = float(instance.costs.assign[item.id, target_bin])
+        assignment_cost = float(instance.costs.assignment_costs[item.id, target_bin])
         decision = Decision(
             placed_item=(item.id, target_bin),
             evicted_offline=[],
@@ -289,8 +289,8 @@ def execute_placement(
             loads[dest_bin] += volume
         assignments[offline_id] = dest_bin
 
-        old_cost = instance.costs.assign[offline_id, origin]
-        new_cost = instance.costs.assign[offline_id, dest_bin]
+        old_cost = instance.costs.assignment_costs[offline_id, origin]
+        new_cost = instance.costs.assignment_costs[offline_id, dest_bin]
         penalty = eviction_penalty(volume, cfg)
         incremental_cost += new_cost - old_cost + penalty
 
@@ -301,7 +301,7 @@ def execute_placement(
         return None
 
     loads[target_bin] += required_volume
-    incremental_cost += float(instance.costs.assign[item.id, target_bin])
+    incremental_cost += float(instance.costs.assignment_costs[item.id, target_bin])
     decision = Decision(
         placed_item=(item.id, target_bin),
         evicted_offline=evicted_pairs,

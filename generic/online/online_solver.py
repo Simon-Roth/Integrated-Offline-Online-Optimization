@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import numpy as np
 from typing import List, Tuple
 
 from generic.config import Config
@@ -39,7 +40,7 @@ class OnlineSolver:
             info = OnlineSolutionInfo(
                 status="NO_ITEMS",
                 runtime=0.0,
-                total_cost=0.0,
+                total_objective=0.0,
                 fallback_items=state_utils.count_fallback_items(state_copy, instance),
                 evicted_offline=0,
                 decisions=[],
@@ -51,9 +52,16 @@ class OnlineSolver:
             feasible_matrix = instance.online_feasible.feasible
 
         state = state_utils.clone_state(initial_state)
+        if (
+            instance.fallback_bin_index >= 0
+            and state.load.shape[0] == len(instance.bins)
+        ):
+            # Ensure fallback row exists when a fallback bin is enabled.
+            zeros = np.zeros((1, state.load.shape[1]), dtype=state.load.dtype)
+            state.load = np.vstack([state.load, zeros])
         volume_lookup = state_utils.build_volume_lookup(instance)
         decisions: List[Decision] = []
-        total_cost = 0.0
+        total_objective = 0.0
         eviction_events = 0
 
         start_time = time.perf_counter()
@@ -71,15 +79,25 @@ class OnlineSolver:
             try:
                 decision = self.policy.select_bin(item, state, instance, feasible_row)
             except PolicyInfeasibleError:
-                info = OnlineSolutionInfo(
-                    status="INFEASIBLE",
-                    runtime=time.perf_counter() - start_time,
-                    total_cost=total_cost,
-                    fallback_items=state_utils.count_fallback_items(state, instance),
-                    evicted_offline=len(state.offline_evicted),
-                    decisions=decisions,
-                )
-                return state, info
+                if self._can_fallback_online(instance, feasible_row):
+                    fallback_idx = instance.fallback_bin_index
+                    fallback_cost = self._fallback_cost(instance, item.id, fallback_idx)
+                    decision = Decision(
+                        placed_item=(item.id, fallback_idx),
+                        evicted_offline=[],
+                        reassignments=[],
+                        incremental_cost=fallback_cost,
+                    )
+                else:
+                    info = OnlineSolutionInfo(
+                        status="INFEASIBLE",
+                        runtime=time.perf_counter() - start_time,
+                        total_objective=total_objective,
+                        fallback_items=state_utils.count_fallback_items(state, instance),
+                        evicted_offline=len(state.offline_evicted),
+                        decisions=decisions,
+                    )
+                    return state, info
             if not self.cfg.problem.binpacking:
                 if decision.evicted_offline or decision.reassignments:
                     raise PolicyInfeasibleError(
@@ -93,7 +111,7 @@ class OnlineSolver:
                 volume_lookup,
             )
             decisions.append(decision)
-            total_cost += decision.incremental_cost
+            total_objective += decision.incremental_cost
             eviction_events += len(decision.evicted_offline)
 
         runtime = time.perf_counter() - start_time
@@ -101,9 +119,38 @@ class OnlineSolver:
         info = OnlineSolutionInfo(
             status="COMPLETED",
             runtime=runtime,
-            total_cost=total_cost,
+            total_objective=total_objective,
             fallback_items=state_utils.count_fallback_items(state, instance),
             evicted_offline=eviction_events,
             decisions=decisions,
         )
         return state, info
+
+    def _can_fallback_online(
+        self,
+        instance: Instance,
+        feasible_row,
+    ) -> bool:
+        if not self.cfg.problem.fallback_is_enabled:
+            return False
+        if not self.cfg.problem.fallback_allowed_online:
+            return False
+        fallback_idx = instance.fallback_bin_index
+        if fallback_idx < 0:
+            return False
+        if feasible_row is None:
+            return True
+        if fallback_idx >= feasible_row.shape[0]:
+            return False
+        return bool(feasible_row[fallback_idx] == 1)
+
+    def _fallback_cost(self, instance: Instance, item_id: int, fallback_idx: int) -> float:
+        costs = instance.costs.assignment_costs
+        if (
+            costs is not None
+            and costs.size
+            and fallback_idx < costs.shape[1]
+            and item_id < costs.shape[0]
+        ):
+            return float(costs[item_id, fallback_idx])
+        return float(self.cfg.costs.huge_fallback)

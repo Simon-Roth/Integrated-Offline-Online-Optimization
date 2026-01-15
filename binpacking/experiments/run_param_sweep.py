@@ -9,16 +9,12 @@ from typing import Any, List, Sequence
 
 from binpacking.config import load_config
 from binpacking.experiments.scenarios import apply_config_overrides, select_scenarios
-from generic.data.instance_generators import generate_instance_with_online
-from generic.data.offline_milp_assembly import build_offline_milp_data
 from generic.experiments.optimal_benchmark import run_optimal_benchmark
 from generic.experiments.pipeline_registry import (
     PipelineSpec,
     default_registry,
-    online_policy_needs_prices,
 )
 from generic.experiments.run_eval import run_eval
-from generic.offline.offline_solver import OfflineMILPSolver as GenericOfflineMILPSolver
 
 
 SCENARIO_CHOICES = [scenario.name for scenario in select_scenarios(None)]
@@ -68,7 +64,8 @@ def parse_args() -> argparse.Namespace:
         help="Override seed list (defaults to cfg.eval.seeds or scenario overrides).",
     )
     parser.add_argument(
-        "--horizon",
+        "--m-onl",
+        dest="M_onl",
         type=int,
         default=None,
         help="Optional override for the number of online items.",
@@ -92,12 +89,12 @@ def _select_pipelines(all_specs: List[PipelineSpec], names: Sequence[str] | None
     return [lookup[name] for name in names]
 
 
-def _scenario_problem_meta(cfg, horizon_override: int | None) -> dict[str, Any]:
-    horizon = horizon_override if horizon_override is not None else cfg.stoch.horizon
+def _scenario_problem_meta(cfg, M_onl_override: int | None) -> dict[str, Any]:
+    M_onl = M_onl_override if M_onl_override is not None else cfg.stoch.horizon
     return {
         "N": int(cfg.problem.N),
         "M_off": int(cfg.problem.M_off),
-        "M_on": int(horizon),
+        "M_on": int(M_onl),
         "dimensions": int(getattr(cfg.problem, "dimensions", 1)),
     }
 
@@ -130,26 +127,13 @@ def main() -> None:
             optimal_summary = run_optimal_benchmark(
                 scenario_cfg,
                 seeds=seeds,
-                horizon=args.horizon,
+                M_onl=args.M_onl,
             )
             optimal_summary["scenario"] = scenario.name
             optimal_summary["scenario_description"] = scenario.description
-            optimal_summary["problem"] = _scenario_problem_meta(scenario_cfg, args.horizon)
+            optimal_summary["problem"] = _scenario_problem_meta(scenario_cfg, args.M_onl)
             optimal_path = scenario_dir / f"optimal_full_horizon_{timestamp}.json"
             optimal_path.write_text(json.dumps(optimal_summary, indent=2))
-
-        if any(online_policy_needs_prices(spec.online_policy) for spec in pipeline_specs):
-            from binpacking.online.prices import compute_prices
-
-            seed_for_prices = seeds[0] if seeds else scenario_cfg.eval.seeds[0]
-            price_instance = generate_instance_with_online(
-                scenario_cfg, seed=seed_for_prices, horizon=args.horizon
-            )
-            price_data = build_offline_milp_data(price_instance, scenario_cfg)
-            price_solver = GenericOfflineMILPSolver(scenario_cfg)
-            price_state, _ = price_solver.solve_from_data(price_data)
-            price_path = Path("binpacking/results/primal_dual.json")
-            compute_prices(scenario_cfg, price_instance, price_state, price_path)
 
         for spec in pipeline_specs:
             offline_solver_cls = _import_symbol(spec.offline_solver)
@@ -160,14 +144,14 @@ def main() -> None:
                 offline_solver_cls=offline_solver_cls,
                 online_policy_cls=online_policy_cls,
                 seeds=seeds,
-                horizon=args.horizon,
+                M_onl=args.M_onl,
                 offline_solver_name=spec.offline_solver,
                 online_policy_name=spec.online_policy,
             )
             summary["pipeline"] = spec.name
             summary["scenario"] = scenario.name
             summary["scenario_description"] = scenario.description
-            summary["problem"] = _scenario_problem_meta(scenario_cfg, args.horizon)
+            summary["problem"] = _scenario_problem_meta(scenario_cfg, args.M_onl)
 
             output_path = scenario_dir / f"eval_{spec.name}_{timestamp}.json"
             output_path.write_text(json.dumps(summary, indent=2))

@@ -43,6 +43,42 @@ class CostAwareBestFitOnlinePolicy(BaseOnlinePolicy):
         best_cost = float("inf")
         best_residual = float("inf")
 
+        # First, try placements without evictions.
+        # We dont just immediatly pick the bin in candidate_bins with min c(j,i) because of the "best-fit" logic as tie break (That is why we go through all for each) 
+        for bin_id in candidate_bins:
+            ctx = build_context(self.cfg, instance, state)
+            decision = execute_placement(
+                bin_id,
+                item,
+                ctx,
+                eviction_order_fn=self._eviction_order_desc,
+                destination_fn=self._select_reassignment_bin,
+                allow_eviction=False,
+            )
+            if decision is None:
+                continue
+
+            incremental_cost = decision.incremental_cost
+            residual_vec = ctx.effective_caps[bin_id] - ctx.loads[bin_id]
+            residual_score = scalarize_vector(residual_vec, self.cfg.heuristics.residual_scalarization)
+            if not np.all(residual_vec >= -TOLERANCE):
+                residual_score = float("inf")
+
+            if (
+                incremental_cost < best_cost - 1e-9
+                or (
+                    abs(incremental_cost - best_cost) <= 1e-9
+                    and residual_score < best_residual - 1e-9
+                )
+            ):
+                best_cost = incremental_cost
+                best_residual = residual_score
+                best_decision = decision
+
+        if best_decision is not None:
+            return best_decision
+
+        # Allow evictions if no feasible bin remained.
         for bin_id in candidate_bins:
             ctx = build_context(self.cfg, instance, state)
             decision = execute_placement(
@@ -125,7 +161,7 @@ class CostAwareBestFitOnlinePolicy(BaseOnlinePolicy):
         zero_vec = np.zeros_like(ctx.effective_caps[0])
         volume = ctx.offline_volumes.get(offline_id, zero_vec)
         instance = ctx.instance
-        feasible_row = instance.feasible.feasible[offline_id]
+        feasible_row = instance.offline_feasible.feasible[offline_id]
         regular_bins = len(instance.bins)
         fallback_idx = instance.fallback_bin_index
 
@@ -139,7 +175,7 @@ class CostAwareBestFitOnlinePolicy(BaseOnlinePolicy):
             residual_vec = residual_vector(ctx.loads[candidate], volume, ctx.effective_caps[candidate])
             if not vector_fits(ctx.loads[candidate], volume, ctx.effective_caps[candidate], TOLERANCE):
                 continue
-            cost = instance.costs.assign[offline_id, candidate]
+            cost = instance.costs.assignment_costs[offline_id, candidate]
             residual_score = scalarize_vector(residual_vec, self.cfg.heuristics.residual_scalarization)
             if cost < best_cost - 1e-9 or (
                 abs(cost - best_cost) <= 1e-9 and residual_score < best_residual
@@ -152,7 +188,7 @@ class CostAwareBestFitOnlinePolicy(BaseOnlinePolicy):
             return best_candidate
 
         if (
-            self.cfg.problem.fallback_is_enabled
+            self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
             and fallback_idx < feasible_row.shape[0]
             and feasible_row[fallback_idx] == 1
         ):

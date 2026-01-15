@@ -51,7 +51,7 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
             )
             for bin_spec in inst.bins
         ]
-        avg_cost = float(np.mean(inst.costs.assign[: len(inst.offline_items), :regular_bins]))
+        avg_cost = float(np.mean(inst.costs.assignment_costs[: len(inst.offline_items), :regular_bins]))
         if not np.isfinite(avg_cost) or avg_cost <= 0.0:
             avg_cost = 1.0
         lambda_scale = avg_cost
@@ -66,7 +66,7 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
             best_residual = float("-inf")
 
             for bin_idx in range(regular_bins):
-                if inst.feasible.feasible[item_idx, bin_idx] != 1:
+                if inst.offline_feasible.feasible[item_idx, bin_idx] != 1:
                     continue
                 cap = eff_caps[bin_idx]
                 if np.any(cap <= 0.0):
@@ -76,10 +76,10 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
 
                 if self.cfg.util_pricing.vector_prices:
                     lam_vec = price_cache[bin_idx]
-                    score = float(inst.costs.assign[item_idx, bin_idx]) + float(np.dot(lam_vec, volume))
+                    score = float(inst.costs.assignment_costs[item_idx, bin_idx]) + float(np.dot(lam_vec, volume))
                 else:
                     lam = float(price_cache[bin_idx])
-                    score = float(inst.costs.assign[item_idx, bin_idx]) + lam * scalarize_vector(volume, size_key)
+                    score = float(inst.costs.assignment_costs[item_idx, bin_idx]) + lam * scalarize_vector(volume, size_key)
                 residual = residual_vector(loads[bin_idx], volume, cap)
                 residual_score = scalarize_vector(residual, self.cfg.heuristics.residual_scalarization)
                 if (
@@ -99,8 +99,8 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
                 continue
 
             if (
-                self.cfg.problem.fallback_is_enabled
-                and inst.feasible.feasible[item_idx, fallback_idx] == 1
+                self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
+                and inst.offline_feasible.feasible[item_idx, fallback_idx] == 1
             ):
                 loads[fallback_idx] += volume
                 assigned_bin[item_idx] = fallback_idx
@@ -146,7 +146,7 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
         fallback_idx = len(inst.bins)
         for item_idx, bin_idx in assigned_bin.items():
             if bin_idx < fallback_idx:
-                total_cost += float(inst.costs.assign[item_idx, bin_idx])
+                total_cost += float(inst.costs.assignment_costs[item_idx, bin_idx])
             else:
                 total_cost += inst.costs.huge_fallback
         return total_cost

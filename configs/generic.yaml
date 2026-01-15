@@ -6,6 +6,8 @@ problem:
   capacity_mean: 30.0 # if d > 1, either provide a list of means or just one (for all)
   capacity_std: 0.1 # if d > 1, either provide a list of stds or just one (for all)
   fallback_is_enabled: true # if false: no fallback bin exists (N columns only)
+  fallback_allowed_offline: true # if true: offline items may use fallback
+  fallback_allowed_online: false # if true: online items may use fallback
   binpacking: true # if false: online policies must not evict/reassign; fallback/eviction tracking stays off
   fallback_capacity_offline: 1000000.0 # big fallback capacity for offline MILP
   fallback_capacity_online: 1000000.0 # placeholder for online phase
@@ -23,7 +25,17 @@ graphs:
 costs:
   assign_beta: [2.0, 5.0] # beta distribution for assignment costs
   assign_bounds: [1.0, 5.0] # lower/upper bounds for assignment costs
-  huge_fallback: 50.0 # fallsback cost
+  huge_fallback: 50.0 # fallback cost
+
+  # Fallback is handled currently as the last option 
+  # Therefore, an item is tried to be placed and only if it doesnt fit anywhere, the fallback (rejection) is used 
+  # With the very high fallback costs, this matches the logic. However:
+  # That means, if we were to set fallback costs to 0 (free rejection), then instead of rejecting an item, which may be preferable, we still try to place it before rejecting
+  # The logic for that is currently handled in online_solver.py
+  # If we want to control fallback logic soley via the policies (and not unified like that via solver), the corresponding part has to be taken out of the solver and written in a new / adapted policy
+  # The reason we do this like that is for the specific bin packing problem this fits better and reduces redundant code
+  # However, minimal adaptions are needed to change that logic
+
   reassignment_penalty: 10.0
   penalty_mode: "per_item"     # could integrate switch to 'per_volume'
   # or dependent on volume

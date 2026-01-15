@@ -39,7 +39,8 @@ def _parse_args() -> argparse.Namespace:
         help="Override seed list (defaults to cfg.eval.seeds).",
     )
     parser.add_argument(
-        "--horizon",
+        "--m-onl",
+        dest="M_onl",
         type=int,
         default=None,
         help="Optional override for the number of online items.",
@@ -63,20 +64,15 @@ def _build_full_horizon_instance(instance: Instance) -> Instance:
     online_specs = [ItemSpec(id=item.id, volume=item.volume) for item in instance.online_items]
     all_items = offline_specs + online_specs
 
-    offline_feas = instance.feasible.feasible
+    offline_feas = instance.offline_feasible.feasible
     if instance.online_feasible is not None:
         online_feas = instance.online_feasible.feasible
         feas_full = np.vstack([offline_feas, online_feas])
     else:
         feas_full = offline_feas.copy()
 
-    fallback_idx = instance.fallback_bin_index
-    if 0 <= fallback_idx < feas_full.shape[1] and online_specs:
-        # Online items should not use fallback in the full-horizon benchmark.
-        feas_full[len(offline_specs) :, fallback_idx] = 0
-
     costs = Costs(
-        assign=instance.costs.assign.copy(),
+        assignment_costs=instance.costs.assignment_costs.copy(),
         reassignment_penalty=instance.costs.reassignment_penalty,
         penalty_mode=instance.costs.penalty_mode,
         per_volume_scale=instance.costs.per_volume_scale,
@@ -87,7 +83,7 @@ def _build_full_horizon_instance(instance: Instance) -> Instance:
         bins=instance.bins,
         offline_items=all_items,
         costs=costs,
-        feasible=FeasibleGraph(feasible=feas_full),
+        offline_feasible=FeasibleGraph(feasible=feas_full),
         fallback_bin_index=instance.fallback_bin_index,
         online_items=[],
         online_feasible=None,
@@ -98,7 +94,7 @@ def run_optimal_benchmark(
     cfg: Config,
     *,
     seeds: List[int],
-    horizon: Optional[int],
+    M_onl: Optional[int],
 ) -> Dict[str, Any]:
     objectives: List[float] = []
     runtimes: List[float] = []
@@ -106,7 +102,7 @@ def run_optimal_benchmark(
 
     for seed in seeds:
         set_global_seed(seed)
-        instance = generate_instance_with_online(cfg, seed=seed, horizon=horizon)
+        instance = generate_instance_with_online(cfg, seed=seed, M_onl=M_onl)
         full_instance = _build_full_horizon_instance(instance)
 
         offline_solver = OfflineMILPSolver(cfg)
@@ -144,7 +140,7 @@ def main() -> None:
     summary = run_optimal_benchmark(
         cfg,
         seeds=seeds,
-        horizon=args.horizon,
+        M_onl=args.M_onl,
     )
 
     output_dir = Path(args.output_dir)

@@ -35,13 +35,13 @@ class ItemSpec:
 class Costs:
     """
     Assignment and eviction costs.
-    - assign: (M_total x N) or (M_total x (N+1)); last column is fallback when enabled
+    - assignment_costs: (M_total x N) or (M_total x (N+1)); last column is fallback when enabled
     - reassignment_penalty: base penalty used when evicting an OFFLINE item
     - penalty_mode: 'per_item' or 'per_volume'
     - per_volume_scale: factor for per-volume penalty
     - huge_fallback: large constant cost for fallback bin to guarantee feasibility
     """
-    assign: np.ndarray
+    assignment_costs: np.ndarray
     reassignment_penalty: float
     penalty_mode: str = "per_item"     # 'per_item' or 'per_volume'
     per_volume_scale: float = 10.0
@@ -52,9 +52,9 @@ class FeasibleGraph:
     """
     Feasibility mask for item-bin edges.
     - feasible[j, i] = 1 if item j is allowed in bin i; 0 otherwise.
-      For ONLINE items, the fallback column must be 0 when fallback is enabled.
+      For ONLINE items, the fallback column is controlled by the online fallback flag.
     """
-    feasible: np.ndarray  # shape (M_total, N) or (M_total, N+1)
+    feasible: np.ndarray  # shape (M_phase, N) or (M_phase, N+1)
 
 @dataclass
 class Instance:
@@ -63,7 +63,7 @@ class Instance:
     - bins: list of BinSpec (length N)
     - offline_items: list of ItemSpec (length M_off)
     - costs: Costs
-    - feasible: FeasibleGraph for OFFLINE items (G_off)
+    - offline_feasible: FeasibleGraph for OFFLINE items (G_off)
     - fallback_bin_index: index == N (i.e., after N regular bins), or -1 if disabled
     - online_items: List of OnlineItem (length M_on)
     - online_feasible: Optional feasible graph for online items
@@ -71,7 +71,7 @@ class Instance:
     bins: List[BinSpec]
     offline_items: List[ItemSpec]
     costs: Costs
-    feasible: FeasibleGraph
+    offline_feasible: FeasibleGraph
     fallback_bin_index: int
     online_items: List[OnlineItem] = field(default_factory=list) 
     online_feasible: Optional[FeasibleGraph] = None

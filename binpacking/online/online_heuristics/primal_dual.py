@@ -43,7 +43,6 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         instance: Instance,
         feasible_row: Optional[np.ndarray],
     ) -> Decision:
-        ctx: PlacementContext = build_context(self.cfg, instance, state)
         fallback_idx = instance.fallback_bin_index
         candidate_bins = self._candidate_bins(item, instance, feasible_row)
         if not candidate_bins:
@@ -54,6 +53,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
 
         # First, try to place without evictions.
         for bin_id in candidate_bins:
+            ctx: PlacementContext = build_context(self.cfg, instance, state)
             if not vector_fits(ctx.loads[bin_id], item.volume, ctx.effective_caps[bin_id], TOLERANCE):
                 continue
 
@@ -78,6 +78,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
 
         # Allow evictions if no feasible bin remained.
         for bin_id in candidate_bins:
+            ctx: PlacementContext = build_context(self.cfg, instance, state)
             score = self._score(bin_id, item, instance)
             if score >= best_score - 1e-12:
                 continue
@@ -119,7 +120,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         return sorted(b for b in candidate_bins if 0 <= b < regular_bins)
 
     def _score(self, bin_id: int, item: OnlineItem, instance: Instance) -> float:
-        c_ji = float(instance.costs.assign[item.id, bin_id])
+        c_ji = float(instance.costs.assignment_costs[item.id, bin_id])
         lam_i = self.lam.get(bin_id, np.zeros_like(item.volume))
         if self.cfg.util_pricing.vector_prices:
             return c_ji + float(np.dot(lam_i, item.volume))
@@ -153,7 +154,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         zero_vec = np.zeros_like(ctx.effective_caps[0])
         volume = ctx.offline_volumes.get(offline_id, zero_vec)
         instance = ctx.instance
-        feasible_row = instance.feasible.feasible[offline_id]
+        feasible_row = instance.offline_feasible.feasible[offline_id]
         regular_bins = len(instance.bins)
         fallback_idx = instance.fallback_bin_index
 
@@ -167,7 +168,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
             residual_vec = residual_vector(ctx.loads[candidate], volume, ctx.effective_caps[candidate])
             if not vector_fits(ctx.loads[candidate], volume, ctx.effective_caps[candidate], TOLERANCE):
                 continue
-            cost = instance.costs.assign[offline_id, candidate]
+            cost = instance.costs.assignment_costs[offline_id, candidate]
             residual_score = scalarize_vector(residual_vec, self.cfg.heuristics.residual_scalarization)
             if cost < best_cost - 1e-9 or (
                 abs(cost - best_cost) <= 1e-9 and residual_score < best_residual
@@ -180,7 +181,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
             return best_candidate
 
         if (
-            self.cfg.problem.fallback_is_enabled
+            self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
             and fallback_idx < feasible_row.shape[0]
             and feasible_row[fallback_idx] == 1
         ):

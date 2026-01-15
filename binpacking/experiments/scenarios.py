@@ -63,7 +63,7 @@ def mean_scaled_beta(bounds: Tuple[float, float], alpha_beta: Tuple[float, float
 # Canonical scenario knobs
 # -----------------------------
 
-TOTAL_ITEMS = 300   # always keep M_off + horizon = 300 for interpretability
+TOTAL_ITEMS = 300   # always keep M_off + M_onl = 300 for interpretability
 
 # Keep bounds fixed in most families for clean attribution
 DEFAULT_BOUNDS = (0.5, 1.7)
@@ -97,8 +97,8 @@ RATIO_SWEEP = [
 
 
 def ratio_overrides(M_off: int) -> Dict[str, Any]:
-    horizon = TOTAL_ITEMS - M_off
-    return {"problem": {"M_off": M_off}, "stoch": {"horizon": horizon}}
+    M_onl = TOTAL_ITEMS - M_off
+    return {"problem": {"M_off": M_off}, "stoch": {"horizon": M_onl}}
 
 
 def base_cost_graph_overrides() -> Dict[str, Any]:
@@ -177,7 +177,7 @@ for tag, p_onl in [("dense", 0.8), ("sparse", 0.2)]:
 # ========= FAMILY 4: LOAD REGIME (capacity_mean changes), fixed ratio (50/50) =========
 for tag, cap_mean in [("underload", 40.0), ("overload", 18.0)]:
     base = ratio_overrides(150)
-    # Preserve the ratio overrides (M_off + horizon) while tweaking capacity_mean.
+    # Preserve the ratio overrides (M_off + M_onl) while tweaking capacity_mean.
     base["problem"]["capacity_mean"] = cap_mean
     SCENARIO_SWEEP.append(
         ScenarioConfig(

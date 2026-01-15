@@ -13,6 +13,7 @@ from generic.config import Config, load_config
 from generic.data.instance_generators import generate_instance_with_online
 from generic.data.offline_milp_assembly import build_offline_milp_data
 from generic.general_utils import set_global_seed
+from generic.experiments.pipeline_registry import online_policy_needs_prices
 from generic.offline.offline_solver import OfflineMILPSolver
 from generic.online.online_solver import OnlineSolver
 from generic.online.policies import BaseOnlinePolicy
@@ -63,7 +64,8 @@ def _parse_args() -> argparse.Namespace:
         help="Override seed list (defaults to cfg.eval.seeds).",
     )
     parser.add_argument(
-        "--horizon",
+        "--m-onl",
+        dest="M_onl",
         type=int,
         default=None,
         help="Optional override for the number of online items.",
@@ -103,7 +105,7 @@ def _build_run_summary(
         },
         "online": {
             "status": online_info.status,
-            "objective": float(online_info.total_cost),
+            "objective": float(online_info.total_objective),
             "runtime": float(online_info.runtime),
             "fallback_items": int(online_info.fallback_items),
             "evicted_offline": int(online_info.evicted_offline),
@@ -123,7 +125,7 @@ def run_eval(
     offline_solver_cls: Type[OfflineMILPSolver],
     online_policy_cls: Type[BaseOnlinePolicy],
     seeds: List[int],
-    horizon: Optional[int],
+    M_onl: Optional[int],
     offline_solver_name: Optional[str] = None,
     online_policy_name: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -131,7 +133,7 @@ def run_eval(
 
     for seed in seeds:
         set_global_seed(seed)
-        instance = generate_instance_with_online(cfg, seed=seed, horizon=horizon)
+        instance = generate_instance_with_online(cfg, seed=seed, M_onl=M_onl)
         offline_solver = offline_solver_cls(cfg)
         # the following check is here because we have some binpacking specific offline algos here in the generic/pipeline_registry.py
         # these do not have a solve_from_data method (working just on A,b,c) but work on instance (volumes, capacities, ...) for simplicity and understanding
@@ -147,6 +149,15 @@ def run_eval(
             )
         else:
             offline_state, offline_info = offline_solver.solve(instance)
+
+        policy_path = online_policy_name
+        if policy_path is None:
+            policy_path = f"{online_policy_cls.__module__}.{online_policy_cls.__name__}"
+        if policy_path and online_policy_needs_prices(policy_path):
+            from binpacking.online.prices import compute_prices
+
+            price_path = Path("binpacking/results/primal_dual.json")
+            compute_prices(cfg, instance, offline_state, price_path)
 
         online_policy = online_policy_cls(cfg)
         online_solver = OnlineSolver(cfg, online_policy)
@@ -215,15 +226,14 @@ def main() -> None:
     offline_solver_cls = _import_symbol(args.offline_solver)
     online_policy_cls = _import_symbol(args.online_policy)
 
-    # if you run an online policy like primal dual here, be sure to compute prices beforehand
-    # prices are only computed manually in run_multiple_evals.py each time a pipeline needs them
+    # If the online policy needs prices (e.g. primal dual), they are computed per seed.
 
     summary = run_eval(
         cfg,
         offline_solver_cls=offline_solver_cls,
         online_policy_cls=online_policy_cls,
         seeds=seeds,
-        horizon=args.horizon,
+        M_onl=args.M_onl,
         offline_solver_name=args.offline_solver,
         online_policy_name=args.online_policy,
     )

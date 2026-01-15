@@ -6,6 +6,8 @@ problem:
   capacity_mean: 30.0
   capacity_std: 0.1
   fallback_is_enabled: true
+  fallback_allowed_offline: true
+  fallback_allowed_online: false
 
 volumes:
   offline_beta: [2.5, 5.0] # prob distribution for offline item vols

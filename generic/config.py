@@ -17,6 +17,8 @@ class ProblemConfig:
     - capacities: list of bin capacities (len == N) (optional if using distribution)
     - capacity_mean/std: parameters to synthesize capacities when list shorter than N
     - fallback_is_enabled: if False, no fallback bin exists in the instance
+    - fallback_allowed_offline: if True, offline items may use the fallback bin
+    - fallback_allowed_online: if True, online items may use the fallback bin
     - binpacking: enable binpacking-specific logic (evictions, fallback tracking)
     - fallback_capacity_offline: fallback bin capacity for offline MILP (scalar or per-dim)
     - fallback_capacity_online: fallback capacity placeholder for online (scalar or per-dim)
@@ -28,6 +30,8 @@ class ProblemConfig:
     capacity_mean: float = 1.0
     capacity_std: float = 0.1
     fallback_is_enabled: bool = True
+    fallback_allowed_offline: bool = True
+    fallback_allowed_online: bool = False
     binpacking: bool = True
     fallback_capacity_offline: float | List[float] = 1e6
     fallback_capacity_online: float | List[float] = 1e6
