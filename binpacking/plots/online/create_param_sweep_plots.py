@@ -31,7 +31,7 @@ import pandas as pd
 from binpacking.config import load_config
 from binpacking.data.instance_generators import generate_offline_instance
 from binpacking.experiments.scenarios import apply_config_overrides, select_scenarios
-from generic.online.state_utils import effective_capacities
+from binpacking.online.state_utils import effective_capacities
 from generic.general_utils import scalarize_vector
 
 RESULTS_ROOT = Path("binpacking/results/param_sweep")

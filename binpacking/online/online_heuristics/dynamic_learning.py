@@ -28,7 +28,7 @@ from generic.config import Config
 from generic.general_utils import effective_capacity, scalarize_vector, vector_fits, residual_vector
 from generic.models import AssignmentState, Decision, Instance, OnlineItem
 from generic.online.policies import BaseOnlinePolicy, PolicyInfeasibleError
-from generic.online.state_utils import (
+from binpacking.online.state_utils import (
     PlacementContext,
     build_context,
     execute_placement,
@@ -210,7 +210,7 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         # Residual after offline load only (online load is modeled by LP vars).
         residual = caps_scaled
 
-        allow_fallback = self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_online
+        allow_fallback = self.cfg.problem.fallback_is_enabled
         x = {}
         y_fallback = {}
         for item in observed:

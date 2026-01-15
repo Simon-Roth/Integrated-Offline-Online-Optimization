@@ -10,7 +10,12 @@ import numpy as np
 from generic.config import Config
 from generic.models import AssignmentState, Decision, Instance, OnlineItem
 from generic.online.policies import BaseOnlinePolicy, PolicyInfeasibleError
-from generic.online.state_utils import PlacementContext, build_context, execute_placement, TOLERANCE
+from binpacking.online.state_utils import (
+    PlacementContext,
+    build_context,
+    execute_placement,
+    TOLERANCE,
+)
 from generic.general_utils import scalarize_vector, residual_vector, vector_fits
 
 

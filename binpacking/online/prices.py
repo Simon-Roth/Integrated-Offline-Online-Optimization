@@ -40,7 +40,8 @@ def compute_prices(
     m = gp.Model("online_fractional_pricing")
     m.Params.OutputFlag = 1 if log_to_console else 0
 
-    allow_fallback = cfg.problem.fallback_is_enabled and cfg.problem.fallback_allowed_online
+    # Pricing-only fallback keeps the LP feasible even if online fallback is disabled.
+    allow_fallback = cfg.problem.fallback_is_enabled
     # Variables x[j,i] for feasible regular bins and y[j] for fallback usage
     x = {}
     y_fallback = {}

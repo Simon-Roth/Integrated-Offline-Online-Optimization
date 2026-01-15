@@ -16,3 +16,4 @@ binpacking/results/offline_cache
 # Generated experiment outputs
 binpacking/results/**/*.json
 generic/results
+binpacking/data_analysis/**/param_sweep
