@@ -42,6 +42,21 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
         dims = inst.bins[0].capacity.shape[0] if inst.bins else 1
         loads = np.zeros((regular_bins + 1, dims))
         assigned_bin: Dict[int, int] = {}
+        if len(inst.offline_items) == 0:
+            runtime = time.perf_counter() - start_time
+            state = AssignmentState(
+                load=loads,
+                assigned_bin=assigned_bin,
+                offline_evicted=set(),
+            )
+            info = OfflineSolutionInfo(
+                algorithm="UtilizationPricedDecreasing",
+                status="FEASIBLE",
+                runtime=runtime,
+                obj_value=0.0,
+                feasible=True,
+            )
+            return state, info
 
         eff_caps = [
             effective_capacity(
@@ -53,8 +68,10 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
         ]
         avg_cost = float(np.mean(inst.costs.assignment_costs[: len(inst.offline_items), :regular_bins]))
         if not np.isfinite(avg_cost) or avg_cost <= 0.0:
+            raise ValueError('Negative or infinite mean cost not fit for UtilDecreasing')
             avg_cost = 1.0
-        lambda_scale = avg_cost
+        cost_scale = avg_cost
+        lambda_scale = 1.0
         if self.cfg.util_pricing.vector_prices:
             price_cache = np.zeros((regular_bins, dims))
         else:
@@ -74,12 +91,15 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
                 if not vector_fits(loads[bin_idx], volume, cap, 1e-9):
                     continue
 
+                norm_volume = volume / cap
                 if self.cfg.util_pricing.vector_prices:
                     lam_vec = price_cache[bin_idx]
-                    score = float(inst.costs.assignment_costs[item_idx, bin_idx]) + float(np.dot(lam_vec, volume))
+                    score = float(inst.costs.assignment_costs[item_idx, bin_idx]) / cost_scale
+                    score += float(np.dot(lam_vec, norm_volume))
                 else:
                     lam = float(price_cache[bin_idx])
-                    score = float(inst.costs.assignment_costs[item_idx, bin_idx]) + lam * scalarize_vector(volume, size_key)
+                    score = float(inst.costs.assignment_costs[item_idx, bin_idx]) / cost_scale
+                    score += lam * scalarize_vector(norm_volume, size_key)
                 residual = residual_vector(loads[bin_idx], volume, cap)
                 residual_score = scalarize_vector(residual, self.cfg.heuristics.residual_scalarization)
                 if (

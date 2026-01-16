@@ -80,6 +80,16 @@ def _mean(values: Iterable[float]) -> float:
     return float(np.mean(arr))
 
 
+def _mean_or_placeholder(
+    values: Iterable[float],
+    placeholder: float | None = None,
+) -> float | None:
+    values_list = list(values)
+    if not values_list:
+        return placeholder
+    return _mean(values_list)
+
+
 def _build_run_summary(
     seed: int,
     cfg: Config,
@@ -156,7 +166,7 @@ def run_eval(
         if policy_path and online_policy_needs_prices(policy_path):
             from binpacking.online.prices import compute_prices
 
-            price_path = Path("binpacking/results/primal_dual.json")
+            price_path = Path("binpacking/results/sim_base.json")
             compute_prices(cfg, instance, offline_state, price_path)
 
         online_policy = online_policy_cls(cfg)
@@ -182,9 +192,19 @@ def run_eval(
     offline_runtime = [run["offline"]["runtime"] for run in runs]
     online_obj = [run["online"]["objective"] for run in runs]
     online_runtime = [run["online"]["runtime"] for run in runs]
-    total_obj = [off + on for off, on in zip(offline_obj, online_obj)]
     offline_fail_statuses = {"INFEASIBLE", "INF_OR_UNBD", "UNBOUNDED"}
     online_fail_statuses = {"INFEASIBLE"}
+    completed_runs = [
+        run
+        for run in runs
+        if run["offline"]["status"] not in offline_fail_statuses
+        and run["online"]["status"] not in online_fail_statuses
+    ]
+    completed_offline_obj = [run["offline"]["objective"] for run in completed_runs]
+    completed_online_obj = [run["online"]["objective"] for run in completed_runs]
+    completed_total_obj = [
+        off + on for off, on in zip(completed_offline_obj, completed_online_obj)
+    ]
     offline_failures = sum(
         1 for run in runs if run["offline"]["status"] in offline_fail_statuses
     )
@@ -205,11 +225,11 @@ def run_eval(
         "online_policy": online_policy_name,
         "offline_statuses": offline_statuses,
         "online_statuses": online_statuses,
-        "total_objective_mean": _mean(total_obj),
+        "total_objective_mean": _mean_or_placeholder(completed_total_obj),
         "aggregate": {
-            "offline_objective_mean": _mean(offline_obj),
+            "offline_objective_mean": _mean_or_placeholder(completed_offline_obj),
             "offline_runtime_mean": _mean(offline_runtime),
-            "online_objective_mean": _mean(online_obj),
+            "online_objective_mean": _mean_or_placeholder(completed_online_obj),
             "online_runtime_mean": _mean(online_runtime),
             "offline_failures": int(offline_failures),
             "online_failures": int(online_failures),
@@ -226,7 +246,7 @@ def main() -> None:
     offline_solver_cls = _import_symbol(args.offline_solver)
     online_policy_cls = _import_symbol(args.online_policy)
 
-    # If the online policy needs prices (e.g. primal dual), they are computed per seed.
+    # If the online policy needs prices (e.g. sim_base), they are computed per seed.
 
     summary = run_eval(
         cfg,

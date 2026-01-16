@@ -16,7 +16,7 @@ from binpacking.online.state_utils import (
 )
 from generic.general_utils import scalarize_vector, residual_vector, vector_fits
 
-class PrimalDualPolicy(BaseOnlinePolicy):
+class SimBasePolicy(BaseOnlinePolicy):
     """
     Cost-minimizing Lagrangian policy:
     - score(i) = c_{ji} + λ_i * volume_j
@@ -24,7 +24,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
     - if none works, raise PolicyInfeasibleError so the caller can handle fallback.
     """
 
-    def __init__(self, cfg: Config, price_path: Path = Path("binpacking/results/primal_dual.json")):
+    def __init__(self, cfg: Config, price_path: Path = Path("binpacking/results/sim_base.json")):
         self.cfg = cfg
         with open(price_path) as f:
             data = json.load(f)
@@ -99,7 +99,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
 
         # No feasible regular bin (even with evictions) -> signal infeasibility so
         # the caller can handle fallback placement consistently with other policies.
-        raise PolicyInfeasibleError(f"PrimalDualPolicy could not place item {item.id}")
+        raise PolicyInfeasibleError(f"SimBasePolicy could not place item {item.id}")
 
     # ------------------------------------------------------------------
     # Helpers

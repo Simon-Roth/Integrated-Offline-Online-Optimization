@@ -239,7 +239,7 @@ Located in `binpacking/online/online_heuristics/`:
 
 - `cost_best_fit.py`:
   chooses bin with lowest incremental cost (cost aware), tie-break by residual (best fit), two-pass (-> no eviction then eviction).
-- `primal_dual.py`:
+- `sim_base.py`:
   uses precomputed dual prices (lambda) to score bins:
   cost + lambda * volume. Fallback is handled by the solver.
 - `dynamic_learning.py`:
@@ -251,12 +251,12 @@ Located in `binpacking/online/online_heuristics/`:
 ## Pricing modules
 
 ### `binpacking/online/prices.py`
-Computes dual prices for primal-dual:
+Computes dual prices for sim_base:
 
 - uses the realized offline state to compute residual capacities,
 - builds a fractional LP for online items,
 - allows fallback in the pricing LP (to guarantee sucessfull computation) when a fallback bin exists, penalized by `cfg.costs.huge_fallback`,
-- writes prices to `binpacking/results/primal_dual.json`.
+- writes prices to `binpacking/results/sim_base.json`.
 
 This is called per seed inside `generic/experiments/run_eval.py` when the
 online policy requires prices.
@@ -284,7 +284,7 @@ Flow:
 - load config,
 - generate instance (offline + online),
 - solve offline (MILP from A,b,c if solver supports `solve_from_data` (which is the case for our generic_solver, but e.g. nor for some binpacking-specific offline heuristics like UTIL as they do not work on A,b,c but Instance)),
-- compute prices if needed (primal-dual),
+- compute prices if needed (sim_base),
 - run online solver,
 - aggregate results and write JSON to `generic/results`.
 
@@ -306,7 +306,7 @@ Key CLI args:
 ```
 python -m generic.experiments.run_multiple_evals \
   --config configs/generic.yaml \
-  --pipelines binpacking_milp+primal_dual util+cost_best_fit \
+  --pipelines binpacking_milp+sim_base util+cost_best_fit \
   --seeds 1 2 3 \
   --m-onl 100 \
   --compute-optimal
@@ -371,4 +371,3 @@ Notes:
 ## Legacy or deprecated components 
 
 default.yaml 
-

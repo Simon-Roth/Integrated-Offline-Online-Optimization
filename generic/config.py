@@ -135,6 +135,28 @@ class DLAConfig:
     use_offline_slack: bool = True
 
 @dataclass
+class PrimalDualConfig:
+    """
+    Primal-dual online MILP controls.
+    - eta_mode: "constant" | "linear" | "sqrt" | "exponential"
+    - eta0: base step size
+    - eta_decay: decay rate for linear/exponential schedules
+    - eta_min: floor for linear/exponential schedules
+    - normalize_update: if True, scale update by (usage - b/T) / (b/T)
+    - normalize_costs: if True, divide costs by a scale factor
+    - cost_scale_mode: "assign_mean" | "assign_bounds"
+    - cost_scale_min: lower bound for cost scale to avoid divide-by-zero
+    """
+    eta_mode: str = "constant"
+    eta0: float = 0.1
+    eta_decay: float = 0.0
+    eta_min: float = 0.0
+    normalize_update: bool = False
+    normalize_costs: bool = False
+    cost_scale_mode: str = "assign_mean"
+    cost_scale_min: float = 1e-8
+
+@dataclass
 class SolverConfig:
     """
     Solver-specific configuration options.
@@ -173,6 +195,7 @@ class Config:
     slack: SlackConfig
     util_pricing: UtilizationPricingConfig
     dla: DLAConfig
+    primal_dual: PrimalDualConfig
     solver: SolverConfig
     heuristics: HeuristicConfig
     eval: EvalConfig
@@ -191,6 +214,7 @@ def load_config_data(data: dict) -> Config:
         slack=SlackConfig(**data["slack"]),
         util_pricing=UtilizationPricingConfig(**data.get("util_pricing", {})),
         dla=DLAConfig(**data.get("dla", {})),
+        primal_dual=PrimalDualConfig(**data.get("primal_dual", {})),
         solver=SolverConfig(**data.get("solver", {})),
         heuristics=HeuristicConfig(**data.get("heuristics", {})),
         eval=EvalConfig(tuple(data["eval"]["seeds"])),

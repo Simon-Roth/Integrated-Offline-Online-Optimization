@@ -8,7 +8,7 @@ problem:
   fallback_is_enabled: true # if false: no fallback bin exists (N columns only)
   fallback_allowed_offline: true # if true: offline items may use fallback
   fallback_allowed_online: false # if true: online items may use fallback
-  binpacking: true # if false: online policies must not evict/reassign; fallback/eviction tracking stays off
+  binpacking: false # if false: online policies must not evict/reassign; fallback/eviction tracking stays off
   fallback_capacity_offline: 1000000.0 # big fallback capacity for offline MILP
   fallback_capacity_online: 1000000.0 # placeholder for online phase
 
@@ -62,3 +62,26 @@ solver:
 
 eval:
   seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
+
+util_pricing:
+  update_rule: "exponential"  # "polynomial" | "exponential"
+  price_exponent: 2.0        # used when update_rule == "polynomial"
+  exp_rate: 3              # used when update_rule == "exponential"
+  vector_prices: true
+
+dla:
+  epsilon: 0.01           # sampling fraction controlling phase boundaries
+  log_prices: false      # if true, write per-phase price logs for plotting
+  output_dir: "binpacking/results/dla"
+  min_phase_len: 25       # optional lower boufnd on phase length
+  use_offline_slack: true
+
+primal_dual:
+  eta_mode: "sqrt"    # "constant" | "linear" | "sqrt" | "exponential"
+  eta0: 1e-05
+  eta_decay: 0.0          # linear/exponential decay rate
+  eta_min: 0.0            # floor for linear/exponential
+  normalize_update: false  # scale updates by relative capacity usage
+  normalize_costs: false   # divide costs by a scale factor
+  cost_scale_mode: "assign_mean" # "assign_mean" | "assign_bounds"
+  cost_scale_min: 1e-8

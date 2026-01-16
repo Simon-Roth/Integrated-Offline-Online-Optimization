@@ -21,7 +21,7 @@ def compute_prices(
     1) Take the offline state and compute the residual problem
     2) Build a fractional LP for ONLINE items only (regular bins 0..N-1).
     3) Minimize assignment cost; read duals Pi of cap constraints as λ_i.
-    4) Save to JSON and return {bin_i: lambda_i}.
+    4) Save to JSON and return {bin_i: lambda_i} (used by sim_base).
     """
     inst = instance
     N = len(inst.bins)

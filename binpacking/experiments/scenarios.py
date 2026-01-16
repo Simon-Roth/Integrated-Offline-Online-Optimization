@@ -87,7 +87,7 @@ RATIO_SWEEP = [
     ("off20_on80",   60),
     #("off30_on70",   90),
     ("off40_on60",  120),
-    ("off50_on50",  150),
+    #("off50_on50",  150),
     ("off60_on40",  180),
     #("off70_on30",  210),
     ("off80_on20",  240),
@@ -145,91 +145,91 @@ for suffix, M_off in RATIO_SWEEP:
         )
     )
 
-# ========= FAMILY 2: VOLUME VARIANCE (ceteris paribus mean & bounds), fixed ratio (50/50) =========
-# Baseline is VOL_MID_VAR = Beta(3,7) on DEFAULT_BOUNDS.
-# We compare:
-# - lowvar: more concentrated Beta with same mean
-# - highvar: uniform Beta(1,1) (higher uncertainty) with capacity_mean adjusted to keep load comparable
-SCENARIO_SWEEP.append(
-    ScenarioConfig(
-        name="vol_midvar_off50_on50",
-        overrides={
-            **ratio_overrides(150),
-            **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
-            **base_cost_graph_overrides(),
-        },
-        description="Volume dispersion baseline (mid variance): Beta(3,7) on [30,180].",
-    )
-)
+# # ========= FAMILY 2: VOLUME VARIANCE (ceteris paribus mean & bounds), fixed ratio (50/50) =========
+# # Baseline is VOL_MID_VAR = Beta(3,7) on DEFAULT_BOUNDS.
+# # We compare:
+# # - lowvar: more concentrated Beta with same mean
+# # - highvar: uniform Beta(1,1) (higher uncertainty) with capacity_mean adjusted to keep load comparable
+# SCENARIO_SWEEP.append(
+#     ScenarioConfig(
+#         name="vol_midvar_off50_on50",
+#         overrides={
+#             **ratio_overrides(150),
+#             **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
+#             **base_cost_graph_overrides(),
+#         },
+#         description="Volume dispersion baseline (mid variance): Beta(3,7) on [30,180].",
+#     )
+# )
 
-SCENARIO_SWEEP.append(
-    ScenarioConfig(
-        name="vol_lowvar_off50_on50",
-        overrides={
-            **ratio_overrides(150),
-            **volume_overrides(VOL_LOW_VAR, DEFAULT_BOUNDS),
-            **base_cost_graph_overrides(),
-        },
-        description="Lower volume variance than baseline (same mean): e.g., Beta(6,14) on [30,180].",
-    )
-)
+# SCENARIO_SWEEP.append(
+#     ScenarioConfig(
+#         name="vol_lowvar_off50_on50",
+#         overrides={
+#             **ratio_overrides(150),
+#             **volume_overrides(VOL_LOW_VAR, DEFAULT_BOUNDS),
+#             **base_cost_graph_overrides(),
+#         },
+#         description="Lower volume variance than baseline (same mean): e.g., Beta(6,14) on [30,180].",
+#     )
+# )
 
-# High-uncertainty control: Uniform Beta(1,1) but keep global load comparable by adjusting capacity_mean
-baseline_Ev = mean_scaled_beta(DEFAULT_BOUNDS, VOL_MID_VAR)                 # 75.0
-uniform_Ev  = mean_scaled_beta(DEFAULT_BOUNDS, VOL_HIGH_VAR_UNIFORM)       # 105.0
-baseline_cap_mean = 2500.0
-uniform_cap_mean = baseline_cap_mean * (uniform_Ev / baseline_Ev)          # 3500.0
+# # High-uncertainty control: Uniform Beta(1,1) but keep global load comparable by adjusting capacity_mean
+# baseline_Ev = mean_scaled_beta(DEFAULT_BOUNDS, VOL_MID_VAR)                 # 75.0
+# uniform_Ev  = mean_scaled_beta(DEFAULT_BOUNDS, VOL_HIGH_VAR_UNIFORM)       # 105.0
+# baseline_cap_mean = 2500.0
+# uniform_cap_mean = baseline_cap_mean * (uniform_Ev / baseline_Ev)          # 3500.0
 
-SCENARIO_SWEEP.append(
-    ScenarioConfig(
-        name="vol_highuncert_uniform_same_load_off50_on50",
-        overrides={
-            **ratio_overrides(150),
-            **volume_overrides(VOL_HIGH_VAR_UNIFORM, DEFAULT_BOUNDS),
-            **base_cost_graph_overrides(),
-            "problem": {"capacity_mean": float(uniform_cap_mean)},
-        },
-        description="High-uncertainty control: Uniform volumes with adjusted capacity_mean to match baseline load.",
-    )
-)
+# SCENARIO_SWEEP.append(
+#     ScenarioConfig(
+#         name="vol_highuncert_uniform_same_load_off50_on50",
+#         overrides={
+#             **ratio_overrides(150),
+#             **volume_overrides(VOL_HIGH_VAR_UNIFORM, DEFAULT_BOUNDS),
+#             **base_cost_graph_overrides(),
+#             "problem": {"capacity_mean": float(uniform_cap_mean)},
+#         },
+#         description="High-uncertainty control: Uniform volumes with adjusted capacity_mean to match baseline load.",
+#     )
+# )
 
 
-# ========= FAMILY 3: GRAPH SPARSITY (only p_onl changes), fixed ratio (50/50) =========
-for tag, p_onl in [("dense", 0.8), ("sparse", 0.2)]:
-    SCENARIO_SWEEP.append(
-        ScenarioConfig(
-            name=f"graph_{tag}_off50_on50",
-            overrides={
-                **ratio_overrides(150),
-                **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
-                **base_cost_graph_overrides(),
-                "graphs": {"p_off": 0.8, "p_onl": p_onl},
-            },
-            description="Graph feasibility test (online sparsity) at fixed volumes/costs/load.",
-        )
-    )
+# # ========= FAMILY 3: GRAPH SPARSITY (only p_onl changes), fixed ratio (50/50) =========
+# for tag, p_onl in [("dense", 0.8), ("sparse", 0.2)]:
+#     SCENARIO_SWEEP.append(
+#         ScenarioConfig(
+#             name=f"graph_{tag}_off50_on50",
+#             overrides={
+#                 **ratio_overrides(150),
+#                 **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
+#                 **base_cost_graph_overrides(),
+#                 "graphs": {"p_off": 0.8, "p_onl": p_onl},
+#             },
+#             description="Graph feasibility test (online sparsity) at fixed volumes/costs/load.",
+#         )
+#     )
 
-# ========= FAMILY 4: LOAD REGIME (capacity_mean changes), fixed ratio (50/50) =========
-# capacity_mean values for N=10, M=300, E[V]=75:
-# - baseline rho=0.9  -> 2500
-# - underload rho~0.8 -> ~2812.5 -> use 2800 (clean)
-# - overload rho~1.1  -> ~2045.5 -> use 2050 (clean)
-for tag, cap_mean in [("underload", 2800.0), ("overload", 2050.0)]:
-    base = ratio_overrides(150)
-    # Preserve the ratio overrides (M_off + M_onl) while tweaking capacity_mean.
-    base["problem"]["capacity_mean"] = cap_mean
-    SCENARIO_SWEEP.append(
-        ScenarioConfig(
-            name=f"load_{tag}_off50_on50",
-            overrides={
-                **base,
-                **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
-                **base_cost_graph_overrides(),
-            },
-            description="Load regime test by varying capacity_mean only (volumes/costs fixed).",
-        )
+# # ========= FAMILY 4: LOAD REGIME (capacity_mean changes), fixed ratio (50/50) =========
+# # capacity_mean values for N=10, M=300, E[V]=75:
+# # - baseline rho=0.9  -> 2500
+# # - underload rho~0.8 -> ~2812.5 -> use 2800 (clean)
+# # - overload rho~1.1  -> ~2045.5 -> use 2050 (clean)
+# for tag, cap_mean in [("underload", 2800.0), ("overload", 2050.0)]:
+#     base = ratio_overrides(150)
+#     # Preserve the ratio overrides (M_off + M_onl) while tweaking capacity_mean.
+#     base["problem"]["capacity_mean"] = cap_mean
+#     SCENARIO_SWEEP.append(
+#         ScenarioConfig(
+#             name=f"load_{tag}_off50_on50",
+#             overrides={
+#                 **base,
+#                 **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
+#                 **base_cost_graph_overrides(),
+#             },
+#             description="Load regime test by varying capacity_mean only (volumes/costs fixed).",
+#         )
         
-    )
+#     )
 
 
 def select_scenarios(names: Iterable[str] | None) -> List[ScenarioConfig]:
