@@ -103,15 +103,16 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         instance: Instance,
         feasible_row: Optional[np.ndarray],
     ) -> Decision:
+        # Step 1-2: initialize duals and remaining capacities once per instance.
         self._reset_if_needed(instance, state)
         assert self._lambda is not None
         assert self._cap_per_step is not None
         assert self._effective_caps is not None
 
+        # Step 3: observe A_t (volume + feasibility) and c_t (assignment costs).
         N = len(instance.bins)
         fallback_idx = instance.fallback_bin_index
         cols = N + (1 if fallback_idx >= 0 else 0)
-
         volume = np.asarray(item.volume, dtype=float).reshape(1, -1)
         feasible = current_feasible_row(
             self.cfg,
@@ -123,53 +124,25 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         )
         costs = current_cost_row(self.cfg, instance, item.id, cols).reshape(1, -1)
 
-        if self.cfg.primal_dual.normalize_costs:
-            costs = costs / self._cost_scale
-
-        if N:
-            if self.cfg.primal_dual.normalize_update:
-                denom = np.where(self._cap_per_step > 0.0, self._cap_per_step, 1.0)
-                price_terms = (self._lambda * (volume.reshape(-1) / denom)).sum(axis=1)
-            else:
-                price_terms = self._lambda @ volume.reshape(-1)
-            costs[0, :N] = costs[0, :N] + price_terms
-
+        # Step 4: solve the price-aware MILP for this single arrival.
         capacities, fallback_capacity = remaining_capacities(
             self.cfg,
             state,
             instance,
             self._effective_caps,
         )
-
-        data = build_offline_milp_data_from_arrays(
-            volumes=volume,
-            costs=costs,
-            feasible=feasible,
-            capacities=capacities,
-            fallback_idx=fallback_idx,
-            fallback_capacity=fallback_capacity,
-            slack_enforce=False,
-            slack_fraction=0.0,
+        costs = self._price_aware_costs(costs, volume, N)
+        assigned_bin = self._solve_price_aware_milp(
+            volume,
+            costs,
+            feasible,
+            capacities,
+            fallback_idx,
+            fallback_capacity,
         )
-        rh_state, rh_info = self._solver.solve_from_data(data)
-        if not rh_info.feasible:
-            raise PolicyInfeasibleError("Primal-dual MILP has no feasible solution.")
 
-        assigned_bin = rh_state.assigned_bin.get(0)
-        if assigned_bin is None:
-            raise PolicyInfeasibleError("Primal-dual MILP did not assign the current item.")
-
-        eta_t = self._eta_t() * self._eta_scale
-        usage = np.zeros_like(self._lambda)
-        if 0 <= assigned_bin < N:
-            usage[assigned_bin] = volume.reshape(-1)
-        if self.cfg.primal_dual.normalize_update:
-            denom = np.where(self._cap_per_step > 0.0, self._cap_per_step, 1.0)
-            delta = (usage - self._cap_per_step) / denom
-        else:
-            delta = usage - self._cap_per_step
-        self._lambda = np.maximum(self._lambda + eta_t * delta, 0.0)
-        self._t += 1
+        # Step 5-7: apply x_t (the OnlineSolver updates state/load), then update lambda.
+        self._update_duals(assigned_bin, volume, N)
 
         incremental_cost = lookup_assignment_cost(self.cfg, instance, item.id, assigned_bin)
         return Decision(
@@ -179,6 +152,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
             incremental_cost=incremental_cost,
         )
 
+    # Initialize per-instance state (lambda, caps, scaling).
     def _reset_if_needed(self, instance: Instance, state: AssignmentState) -> None:
         # Reset per-instance state so prices/counters don't leak across runs.
         if self._instance_id == id(instance) and self._lambda is not None:
@@ -210,6 +184,67 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         eta0 = self._eta_t() * self._eta_scale
         self._lambda = eta0 * utilization
 
+    # Apply optional cost scaling and add the price term to costs.
+    def _price_aware_costs(self, costs: np.ndarray, volume: np.ndarray, N: int) -> np.ndarray:
+        if self.cfg.primal_dual.normalize_costs:
+            costs = costs / self._cost_scale
+        if N:
+            price_terms = self._price_terms(volume)
+            costs[0, :N] = costs[0, :N] + price_terms
+        return costs
+
+    # Compute lambda^T A_t^cap term (optionally normalized).
+    def _price_terms(self, volume: np.ndarray) -> np.ndarray:
+        volume_vec = volume.reshape(-1)
+        if self.cfg.primal_dual.normalize_update:
+            denom = np.where(self._cap_per_step > 0.0, self._cap_per_step, 1.0)
+            scaled = volume_vec / denom
+            return (self._lambda * scaled).sum(axis=1)
+        return self._lambda @ volume_vec
+
+    # Solve the one-step price-aware MILP and return the chosen bin.
+    def _solve_price_aware_milp(
+        self,
+        volume: np.ndarray,
+        costs: np.ndarray,
+        feasible: np.ndarray,
+        capacities: np.ndarray,
+        fallback_idx: int,
+        fallback_capacity: float | np.ndarray,
+    ) -> int:
+        data = build_offline_milp_data_from_arrays(
+            volumes=volume,
+            costs=costs,
+            feasible=feasible,
+            capacities=capacities,
+            fallback_idx=fallback_idx,
+            fallback_capacity=fallback_capacity,
+            slack_enforce=False,
+            slack_fraction=0.0,
+        )
+        rh_state, rh_info = self._solver.solve_from_data(data)
+        if not rh_info.feasible:
+            raise PolicyInfeasibleError("Primal-dual MILP has no feasible solution.")
+        assigned_bin = rh_state.assigned_bin.get(0)
+        if assigned_bin is None:
+            raise PolicyInfeasibleError("Primal-dual MILP did not assign the current item.")
+        return int(assigned_bin)
+
+    # Update dual prices after choosing x_t.
+    def _update_duals(self, assigned_bin: int, volume: np.ndarray, N: int) -> None:
+        eta_t = self._eta_t() * self._eta_scale
+        usage = np.zeros_like(self._lambda)
+        if 0 <= assigned_bin < N:
+            usage[assigned_bin] = volume.reshape(-1)
+        if self.cfg.primal_dual.normalize_update:
+            denom = np.where(self._cap_per_step > 0.0, self._cap_per_step, 1.0)
+            delta = (usage - self._cap_per_step) / denom
+        else:
+            delta = usage - self._cap_per_step
+        self._lambda = np.maximum(self._lambda + eta_t * delta, 0.0)
+        self._t += 1
+
+    # Step-size schedule for the dual update.
     def _eta_t(self) -> float:
         mode = self.cfg.primal_dual.eta_mode.lower()
         eta0 = float(self.cfg.primal_dual.eta0)
@@ -226,6 +261,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
             return max(eta_min, eta0 * float(np.exp(-decay * float(t - 1))))
         raise ValueError(f"Unknown eta_mode: {self.cfg.primal_dual.eta_mode}")
 
+    # Compute the scale used to normalize costs.
     def _compute_cost_scale(self, instance: Instance, N: int) -> float:
         min_scale = float(self.cfg.primal_dual.cost_scale_min)
         mode = self.cfg.primal_dual.cost_scale_mode.lower()
@@ -279,6 +315,7 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
         instance: Instance,
         feasible_row: Optional[np.ndarray],
     ) -> Decision:
+        # Step 1: observe A_t and remaining capacity (from state).
         idx = self._online_index(item, instance)
         remaining = max(0, len(instance.online_items) - idx - 1)
 
@@ -286,6 +323,7 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
         fallback_idx = instance.fallback_bin_index
         cols = N + (1 if fallback_idx >= 0 else 0)
 
+        # Step 2: sample future A_tau for tau > t and build the remaining MILP.
         volumes = self._build_volumes(item, remaining)
         costs = self._build_costs(instance, item.id, remaining, N, cols)
         feasible = self._build_feasible(
@@ -298,6 +336,7 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
         )
         capacities, fallback_capacity = remaining_capacities(self.cfg, state, instance)
 
+        # Step 3: solve the remaining-horizon MILP.
         data = build_offline_milp_data_from_arrays(
             volumes=volumes,
             costs=costs,
@@ -315,6 +354,7 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
         assigned_bin = rh_state.assigned_bin.get(0)
         if assigned_bin is None:
             raise PolicyInfeasibleError("Rolling horizon MILP did not assign the current item.")
+        # Step 4-5: fix x_t (current item), OnlineSolver updates remaining capacity after applying.
         incremental_cost = lookup_assignment_cost(self.cfg, instance, item.id, assigned_bin)
         return Decision(
             placed_item=(item.id, int(assigned_bin)),
@@ -323,6 +363,7 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
             incremental_cost=incremental_cost,
         )
 
+    # Map online item id to its index in the arrival sequence.
     def _online_index(self, item: OnlineItem, instance: Instance) -> int:
         base = len(instance.offline_items)
         idx = item.id - base
@@ -334,6 +375,7 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
             )
         return idx
 
+    # Stack current item volume with sampled future volumes.
     def _build_volumes(self, item: OnlineItem, remaining: int) -> np.ndarray:
         current_volume = np.asarray(item.volume, dtype=float).reshape(1, -1)
         if remaining <= 0:
@@ -341,6 +383,7 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
         future_volumes = _sample_online_volumes(self.cfg, self._rng, remaining)
         return np.vstack([current_volume, future_volumes])
 
+    # Build assignment costs for current + sampled items.
     def _build_costs(
         self,
         instance: Instance,
@@ -361,6 +404,7 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
             costs[1:] = base_costs
         return costs
 
+    # Build feasibility rows for current + sampled items.
     def _build_feasible(
         self,
         item: OnlineItem,

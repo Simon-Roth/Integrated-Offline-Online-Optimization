@@ -19,6 +19,7 @@ def current_cost_row(
     item_id: int,
     cols: int,
 ) -> np.ndarray:
+    """Return the assignment cost row for the current item."""
     row = np.full((cols,), cfg.costs.huge_fallback, dtype=float)
     costs = instance.costs.assignment_costs
     if costs is None or not costs.size:
@@ -37,6 +38,7 @@ def current_feasible_row(
     cols: int,
     fallback_idx: int,
 ) -> np.ndarray:
+    """Return feasibility row for the current item (with fallback column if enabled)."""
     if feasible_row is not None:
         row = np.asarray(feasible_row, dtype=int).reshape(-1)
         if row.size == cols:
@@ -113,6 +115,7 @@ def lookup_assignment_cost(
     item_id: int,
     bin_id: int,
 ) -> float:
+    """Return the assignment cost for item->bin (fallback uses huge_fallback)."""
     costs = instance.costs.assignment_costs
     if (
         costs is not None

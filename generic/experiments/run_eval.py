@@ -219,6 +219,20 @@ def run_eval(
         offline_statuses[offline_status] = offline_statuses.get(offline_status, 0) + 1
         online_statuses[online_status] = online_statuses.get(online_status, 0) + 1
 
+    per_seed = [
+        {
+            "seed": run["seed"],
+            "offline_objective": run["offline"]["objective"],
+            "online_objective": run["online"]["objective"],
+            "total_objective": run["offline"]["objective"] + run["online"]["objective"],
+            "offline_runtime": run["offline"]["runtime"],
+            "online_runtime": run["online"]["runtime"],
+            "offline_status": run["offline"]["status"],
+            "online_status": run["online"]["status"],
+        }
+        for run in runs
+    ]
+
     summary = {
         "seed_count": len(seeds),
         "offline_solver": offline_solver_name,
@@ -226,6 +240,7 @@ def run_eval(
         "offline_statuses": offline_statuses,
         "online_statuses": online_statuses,
         "total_objective_mean": _mean_or_placeholder(completed_total_obj),
+        "per_seed": per_seed,
         "aggregate": {
             "offline_objective_mean": _mean_or_placeholder(completed_offline_obj),
             "offline_runtime_mean": _mean(offline_runtime),

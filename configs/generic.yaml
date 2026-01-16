@@ -8,7 +8,7 @@ problem:
   fallback_is_enabled: true # if false: no fallback bin exists (N columns only)
   fallback_allowed_offline: true # if true: offline items may use fallback
   fallback_allowed_online: false # if true: online items may use fallback
-  binpacking: false # if false: online policies must not evict/reassign; fallback/eviction tracking stays off
+  binpacking: true # if false: online policies must not evict/reassign; fallback/eviction tracking stays off
   fallback_capacity_offline: 1000000.0 # big fallback capacity for offline MILP
   fallback_capacity_online: 1000000.0 # placeholder for online phase
 

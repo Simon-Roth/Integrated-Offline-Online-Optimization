@@ -75,3 +75,13 @@ dla:
   output_dir: "binpacking/results/dla"
   min_phase_len: 25       # optional lower boufnd on phase length
   use_offline_slack: true
+
+primal_dual:
+  eta_mode: "sqrt"    # "constant" | "linear" | "sqrt" | "exponential"
+  eta0: 1e-05
+  eta_decay: 0.0          # linear/exponential decay rate
+  eta_min: 0.0            # floor for linear/exponential
+  normalize_update: false  # scale updates by relative capacity usage
+  normalize_costs: false   # divide costs by a scale factor
+  cost_scale_mode: "assign_mean" # "assign_mean" | "assign_bounds"
+  cost_scale_min: 1e-8

@@ -99,6 +99,7 @@ def run_optimal_benchmark(
     objectives: List[float] = []
     runtimes: List[float] = []
     offline_statuses: Dict[str, int] = {}
+    per_seed: List[Dict[str, Any]] = []
 
     for seed in seeds:
         set_global_seed(seed)
@@ -115,6 +116,14 @@ def run_optimal_benchmark(
         objectives.append(float(info.obj_value))
         runtimes.append(float(info.runtime))
         offline_statuses[info.status] = offline_statuses.get(info.status, 0) + 1
+        per_seed.append(
+            {
+                "seed": seed,
+                "total_objective": float(info.obj_value),
+                "runtime": float(info.runtime),
+                "status": info.status,
+            }
+        )
 
     offline_fail_statuses = {"INFEASIBLE", "INF_OR_UNBD", "UNBOUNDED"}
     failures = sum(count for status, count in offline_statuses.items() if status in offline_fail_statuses)
@@ -123,6 +132,7 @@ def run_optimal_benchmark(
         "seed_count": len(seeds),
         "offline_solver": "generic.offline.offline_solver.OfflineMILPSolver",
         "offline_statuses": offline_statuses,
+        "per_seed": per_seed,
         "aggregate": {
             "total_objective_mean": _mean(objectives),
             "runtime_mean": _mean(runtimes),
