@@ -8,8 +8,9 @@ Key elements implemented here:
  - Capacity scaling per phase: b_i^(k) = (1 - h_k) * (t_k / M_onl) * C_i where
    h_k = epsilon * sqrt(M_onl / t_k).
  - Dual-based price computation on the observed items so far (fractional LP).
- - Online placement using cost + price scoring, reusing the primal-dual placement
-   helpers (feasibility, optional evictions).
+ - Online placement using price-aware milp
+ - If no placement is possible, we try evicting offline items (except if disabled in config)
+ - If still no placement possible, generic/online_solver.py will try the fallback (if enabled) as last resort
 
 The policy optionally logs per-phase prices/residuals to a JSON file if a path is
 provided and cfg.dla.log_prices is True.
@@ -18,16 +19,19 @@ provided and cfg.dla.log_prices is True.
 import json
 import math
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import gurobipy as gp
 from gurobipy import GRB
 import numpy as np
 
 from generic.config import Config
+from generic.data.offline_milp_assembly import build_offline_milp_data_from_arrays
 from generic.general_utils import effective_capacity, scalarize_vector, vector_fits, residual_vector
 from generic.models import AssignmentState, Decision, Instance, OnlineItem
+from generic.offline.offline_solver import OfflineMILPSolver
 from generic.online.policies import BaseOnlinePolicy, PolicyInfeasibleError
+from generic.online.policy_utils import current_feasible_row, lookup_assignment_cost, remaining_capacities
 from binpacking.online.state_utils import (
     PlacementContext,
     build_context,
@@ -53,6 +57,7 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         self._processed: int = 0  # number of arrivals already placed
         self._seen_items: List[OnlineItem] = []
         self._log_records: List[Dict[str, object]] = []
+        self._milp_solver = OfflineMILPSolver(cfg)
 
    
     def select_bin(
@@ -73,36 +78,15 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         if not candidate_bins:
             raise PolicyInfeasibleError(f"No feasible regular bin for online item {item.id}")
 
+        # First, try to place without evictions via a one-item MILP (regular bins only).
+        milp_decision = self._milp_no_eviction(item, state, instance, feasible_row)
+        if milp_decision is not None:
+            self._mark_processed(item)
+            return milp_decision
+
+        # Allow evictions if no feasible bin remained (except if disabled in config)
         best_decision: Optional[Decision] = None
         best_score = float("inf")
-
-        # First, try to place without evictions.
-        for bin_id in candidate_bins:
-            ctx: PlacementContext = build_context(self.cfg, instance, state)
-            if not vector_fits(ctx.loads[bin_id], item.volume, ctx.effective_caps[bin_id], TOLERANCE):
-                continue
-
-            score = self._score(bin_id, item, instance)
-            if score >= best_score - 1e-12:
-                continue
-
-            decision = execute_placement(
-                bin_id,
-                item,
-                ctx,
-                eviction_order_fn=self._eviction_order_desc,
-                destination_fn=self._select_reassignment_bin,
-                allow_eviction=False,
-            )
-            if decision is not None:
-                best_score = score
-                best_decision = decision
-
-        if best_decision is not None:
-            self._mark_processed(item)
-            return best_decision
-
-        # Allow evictions if no feasible bin remained.
         for bin_id in candidate_bins:
             ctx: PlacementContext = build_context(self.cfg, instance, state)
             score = self._score(bin_id, item, instance)
@@ -284,6 +268,64 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
     # ------------------------------------------------------------------
     # Placement helpers (reuse primal-dual structure)
     # ------------------------------------------------------------------
+    def _milp_no_eviction(
+        self,
+        item: OnlineItem,
+        state: AssignmentState,
+        instance: Instance,
+        feasible_row: Optional[np.ndarray],
+    ) -> Optional[Decision]:
+        regular_bins = len(instance.bins)
+        if regular_bins <= 0:
+            return None
+        fallback_idx = instance.fallback_bin_index
+        cols = regular_bins + (1 if fallback_idx >= 0 else 0)
+        try:
+            feasible_full = current_feasible_row(
+                self.cfg,
+                item,
+                feasible_row,
+                regular_bins,
+                cols,
+                fallback_idx,
+            )
+        except PolicyInfeasibleError:
+            return None
+
+        feasible = feasible_full.reshape(-1)[:regular_bins]
+        if feasible.sum() == 0:
+            return None
+
+        costs = np.array(
+            [[self._score(bin_id, item, instance) for bin_id in range(regular_bins)]],
+            dtype=float,
+        )
+        volume = np.asarray(item.volume, dtype=float).reshape(1, -1)
+        capacities, _fallback_capacity = remaining_capacities(self.cfg, state, instance)
+        data = build_offline_milp_data_from_arrays(
+            volumes=volume,
+            costs=costs,
+            feasible=feasible.reshape(1, -1),
+            capacities=capacities,
+            fallback_idx=-1,
+            fallback_capacity=0.0,
+            slack_enforce=False,
+            slack_fraction=0.0,
+        )
+        rh_state, rh_info = self._milp_solver.solve_from_data(data)
+        if not rh_info.feasible:
+            return None
+        assigned_bin = rh_state.assigned_bin.get(0)
+        if assigned_bin is None:
+            return None
+        incremental_cost = lookup_assignment_cost(self.cfg, instance, item.id, assigned_bin)
+        return Decision(
+            placed_item=(item.id, int(assigned_bin)),
+            evicted_offline=[],
+            reassignments=[],
+            incremental_cost=incremental_cost,
+        )
+
     def _candidate_bins(
         self,
         item: OnlineItem,
@@ -291,15 +333,24 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         feasible_row: Optional[np.ndarray],
     ) -> List[int]:
         regular_bins = len(instance.bins)
-        candidate_bins: Set[int] = set(item.feasible_bins)
-        if feasible_row is not None:
-            for idx, allowed in enumerate(feasible_row[:regular_bins]):
-                if allowed:
-                    candidate_bins.add(int(idx))
-        return sorted(b for b in candidate_bins if 0 <= b < regular_bins)
+        fallback_idx = instance.fallback_bin_index
+        cols = regular_bins + (1 if fallback_idx >= 0 else 0)
+        try:
+            feasible = current_feasible_row(
+                self.cfg,
+                item,
+                feasible_row,
+                regular_bins,
+                cols,
+                fallback_idx,
+            )
+        except PolicyInfeasibleError:
+            return []
+        row = feasible.reshape(-1)
+        return [idx for idx in range(regular_bins) if row[idx] == 1]
 
     def _score(self, bin_id: int, item: OnlineItem, instance: Instance) -> float:
-        c_ji = float(instance.costs.assignment_costs[item.id, bin_id])
+        c_ji = lookup_assignment_cost(self.cfg, instance, item.id, bin_id)
         lam_i = self._current_prices.get(bin_id, np.zeros_like(item.volume))
         if self.cfg.util_pricing.vector_prices:
             return c_ji + float(np.dot(lam_i, item.volume))

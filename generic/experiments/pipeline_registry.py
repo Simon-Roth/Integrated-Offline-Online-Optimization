@@ -11,13 +11,22 @@ OFFLINE_UTILIZATION = "binpacking.offline.offline_heuristics.utilization_priced.
 ONLINE_ROLLING_MILP = "generic.online.policies.RollingHorizonMILPPolicy"
 ONLINE_CABF = "binpacking.online.online_heuristics.cost_best_fit.CostAwareBestFitOnlinePolicy"
 ONLINE_SIM_BASE = "binpacking.online.online_heuristics.sim_base.SimBasePolicy"
+ONLINE_SIM_DUAL = "generic.online.policies.SimDualPolicy"
 ONLINE_DYNAMIC_LEARNING = "binpacking.online.online_heuristics.dynamic_learning.DynamicLearningPolicy"
 ONLINE_PRIMAL_DUAL = "generic.online.policies.PrimalDualPolicy"
-ONLINE_POLICIES_NEED_PRICES = {ONLINE_SIM_BASE}
+ONLINE_POLICIES_NEED_PRICES = {ONLINE_SIM_BASE, ONLINE_SIM_DUAL}
 
 
 def online_policy_needs_prices(policy_path: str) -> bool:
     return policy_path in ONLINE_POLICIES_NEED_PRICES
+
+
+def online_policy_price_path(policy_path: str) -> str | None:
+    if policy_path == ONLINE_SIM_BASE:
+        return "binpacking/results/sim_base.json"
+    if policy_path == ONLINE_SIM_DUAL:
+        return "binpacking/results/sim_dual.json"
+    return None
 
 
 @dataclass(frozen=True)
@@ -65,6 +74,7 @@ def default_registry() -> PipelineRegistry:
         ("rolling_horizon_milp", ONLINE_ROLLING_MILP),
         ("cost_best_fit", ONLINE_CABF),
         ("sim_base", ONLINE_SIM_BASE),
+        ("sim_dual", ONLINE_SIM_DUAL),
         ("dynamic_learning", ONLINE_DYNAMIC_LEARNING),
         ('primal_dual',ONLINE_PRIMAL_DUAL)
     ]

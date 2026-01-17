@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol, Optional
+import json
 
 import numpy as np
 
@@ -60,6 +62,7 @@ __all__ = [
     "BaseOnlinePolicy",
     "PolicyInfeasibleError",
     "PrimalDualPolicy",
+    "SimDualPolicy",
     "RollingHorizonMILPPolicy",
 ]
 
@@ -280,6 +283,140 @@ class PrimalDualPolicy(BaseOnlinePolicy):
                 return max(min_scale, 1.0)
             return max(min_scale, float(np.mean(values)))
         raise ValueError(f"Unknown cost_scale_mode: {self.cfg.primal_dual.cost_scale_mode}")
+
+
+class SimDualPolicy(BaseOnlinePolicy):
+    """
+    Price-aware MILP policy with fixed dual prices (no online updates).
+    """
+
+    def __init__(
+        self,
+        cfg: Config,
+        *,
+        price_path: Path = Path("binpacking/results/sim_dual.json"),
+        time_limit: int = 60,
+        mip_gap: float = 0.01,
+        threads: int = 0,
+        log_to_console: bool = False,
+    ) -> None:
+        self.cfg = cfg
+        self._price_path = price_path
+        self._lambda = self._load_prices(price_path)
+        from generic.offline.offline_solver import OfflineMILPSolver
+
+        self._solver = OfflineMILPSolver(
+            cfg,
+            time_limit=time_limit,
+            mip_gap=mip_gap,
+            threads=threads,
+            log_to_console=log_to_console,
+        )
+
+    def select_bin(
+        self,
+        item: OnlineItem,
+        state: AssignmentState,
+        instance: Instance,
+        feasible_row: Optional[np.ndarray],
+    ) -> Decision:
+        # Step 1: observe A_t (volume + feasibility) and c_t (assignment costs)
+        N = len(instance.bins)
+        fallback_idx = instance.fallback_bin_index
+        cols = N + (1 if fallback_idx >= 0 else 0)
+        volume = np.asarray(item.volume, dtype=float).reshape(1, -1)
+        feasible = current_feasible_row(
+            self.cfg,
+            item,
+            feasible_row,
+            N,
+            cols,
+            fallback_idx,
+        )
+        costs = current_cost_row(self.cfg, instance, item.id, cols).reshape(1, -1)
+
+        # Step 2: add fixed dual prices to the objective and solve the one-step MILP.
+        capacities, fallback_capacity = remaining_capacities(self.cfg, state, instance)
+        costs = self._price_aware_costs(costs, volume, N)
+        assigned_bin = self._solve_price_aware_milp(
+            volume,
+            costs,
+            feasible,
+            capacities,
+            fallback_idx,
+            fallback_capacity,
+        )
+
+        incremental_cost = lookup_assignment_cost(self.cfg, instance, item.id, assigned_bin)
+        return Decision(
+            placed_item=(item.id, int(assigned_bin)),
+            evicted_offline=[],
+            reassignments=[],
+            incremental_cost=incremental_cost,
+        )
+
+    # Load per-bin dual prices from JSON.
+    def _load_prices(self, price_path: Path) -> dict[int, np.ndarray]:
+        with open(price_path) as handle:
+            data = json.load(handle)
+        prices = {}
+        for key, value in data.get("prices", {}).items():
+            if isinstance(value, list):
+                prices[int(key)] = np.asarray(value, dtype=float)
+            else:
+                prices[int(key)] = np.asarray([float(value)], dtype=float)
+        return prices
+
+    # Add lambda^T A_t^cap to assignment costs (regular bins only).
+    def _price_aware_costs(self, costs: np.ndarray, volume: np.ndarray, N: int) -> np.ndarray:
+        if N <= 0:
+            return costs
+        vol = volume.reshape(-1)
+        price_terms = np.zeros((N,), dtype=float)
+        for bin_id in range(N):
+            lam = self._lambda.get(bin_id)
+            if lam is None:
+                continue
+            lam_vec = lam.reshape(-1)
+            if lam_vec.size == 1 and vol.size > 1:
+                lam_vec = np.full((vol.size,), float(lam_vec[0]))
+            if lam_vec.size != vol.size:
+                raise ValueError(
+                    f"Price vector dimension mismatch for bin {bin_id}: "
+                    f"{lam_vec.size} vs {vol.size}"
+                )
+            price_terms[bin_id] = float(np.dot(lam_vec, vol))
+        costs[0, :N] = costs[0, :N] + price_terms
+        return costs
+
+    # Solve the one-step price-aware MILP and return the chosen bin.
+    def _solve_price_aware_milp(
+        self,
+        volume: np.ndarray,
+        costs: np.ndarray,
+        feasible: np.ndarray,
+        capacities: np.ndarray,
+        fallback_idx: int,
+        fallback_capacity: float | np.ndarray,
+    ) -> int:
+        data = build_offline_milp_data_from_arrays(
+            volumes=volume,
+            costs=costs,
+            feasible=feasible,
+            capacities=capacities,
+            fallback_idx=fallback_idx,
+            fallback_capacity=fallback_capacity,
+            slack_enforce=False,
+            slack_fraction=0.0,
+        )
+        rh_state, rh_info = self._solver.solve_from_data(data)
+        if not rh_info.feasible:
+            raise PolicyInfeasibleError("SimDual MILP has no feasible solution.")
+        assigned_bin = rh_state.assigned_bin.get(0)
+        if assigned_bin is None:
+            raise PolicyInfeasibleError("SimDual MILP did not assign the current item.")
+        return int(assigned_bin)
+
 
 class RollingHorizonMILPPolicy(BaseOnlinePolicy):
     """

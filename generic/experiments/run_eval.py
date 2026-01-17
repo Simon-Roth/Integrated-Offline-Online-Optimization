@@ -13,7 +13,10 @@ from generic.config import Config, load_config
 from generic.data.instance_generators import generate_instance_with_online
 from generic.data.offline_milp_assembly import build_offline_milp_data
 from generic.general_utils import set_global_seed
-from generic.experiments.pipeline_registry import online_policy_needs_prices
+from generic.experiments.pipeline_registry import (
+    online_policy_needs_prices,
+    online_policy_price_path,
+)
 from generic.offline.offline_solver import OfflineMILPSolver
 from generic.online.online_solver import OnlineSolver
 from generic.online.policies import BaseOnlinePolicy
@@ -166,7 +169,10 @@ def run_eval(
         if policy_path and online_policy_needs_prices(policy_path):
             from binpacking.online.prices import compute_prices
 
-            price_path = Path("binpacking/results/sim_base.json")
+            price_path_str = online_policy_price_path(policy_path)
+            if price_path_str is None:
+                raise ValueError(f"No price output path configured for {policy_path}")
+            price_path = Path(price_path_str)
             compute_prices(cfg, instance, offline_state, price_path)
 
         online_policy = online_policy_cls(cfg)
