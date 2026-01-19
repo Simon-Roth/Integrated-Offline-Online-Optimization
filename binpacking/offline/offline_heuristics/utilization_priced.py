@@ -6,8 +6,10 @@ from typing import Dict, Tuple, List
 
 import numpy as np
 
-from generic.general_utils import effective_capacity, scalarize_vector, vector_fits, residual_vector
+from generic.general_utils import effective_capacity, scalarize_vector
+from generic.data.offline_milp_assembly import build_offline_milp_data_from_arrays
 from generic.models import AssignmentState, Instance
+from generic.offline.offline_solver import OfflineMILPSolver
 from generic.offline.offline_policies import BaseOfflinePolicy
 from generic.offline.models import OfflineSolutionInfo
 
@@ -38,9 +40,10 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
         )
 
         regular_bins = len(inst.bins)
-        fallback_idx = regular_bins
+        fallback_idx = inst.fallback_bin_index
+        bins_total = regular_bins + (1 if fallback_idx >= 0 else 0)
         dims = inst.bins[0].capacity.shape[0] if inst.bins else 1
-        loads = np.zeros((regular_bins + 1, dims))
+        loads = np.zeros((bins_total, dims))
         assigned_bin: Dict[int, int] = {}
         if len(inst.offline_items) == 0:
             runtime = time.perf_counter() - start_time
@@ -77,56 +80,54 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
         else:
             price_cache = np.zeros(regular_bins)
 
+        solver = OfflineMILPSolver(self.cfg, log_to_console=False)
+        cols = regular_bins + (1 if fallback_idx >= 0 else 0)
+
         for item_idx, volume in items_sorted:
-            best_bin = None
-            best_score = float("inf")
-            best_residual = float("-inf")
+            remaining = np.maximum(0.0, np.asarray(eff_caps, dtype=float) - loads[:regular_bins])
+            costs = np.asarray(inst.costs.assignment_costs[item_idx, :cols], dtype=float).reshape(1, -1)
+            costs = costs / cost_scale
 
             for bin_idx in range(regular_bins):
-                if inst.offline_feasible.feasible[item_idx, bin_idx] != 1:
-                    continue
-                cap = eff_caps[bin_idx]
-                if np.any(cap <= 0.0):
-                    continue
-                if not vector_fits(loads[bin_idx], volume, cap, 1e-9):
-                    continue
-
-                norm_volume = volume / cap
+                cap = np.asarray(eff_caps[bin_idx], dtype=float)
+                denom = np.where(cap > 0.0, cap, 1.0)
+                norm_volume = volume / denom
                 if self.cfg.util_pricing.vector_prices:
                     lam_vec = price_cache[bin_idx]
-                    score = float(inst.costs.assignment_costs[item_idx, bin_idx]) / cost_scale
-                    score += float(np.dot(lam_vec, norm_volume))
+                    costs[0, bin_idx] += float(np.dot(lam_vec, norm_volume))
                 else:
                     lam = float(price_cache[bin_idx])
-                    score = float(inst.costs.assignment_costs[item_idx, bin_idx]) / cost_scale
-                    score += lam * scalarize_vector(norm_volume, size_key)
-                residual = residual_vector(loads[bin_idx], volume, cap)
-                residual_score = scalarize_vector(residual, self.cfg.heuristics.residual_scalarization)
-                if (
-                    score < best_score - 1e-9
-                    or (abs(score - best_score) <= 1e-9 and residual_score > best_residual)
-                ):
-                    best_score = score
-                    best_residual = residual_score
-                    best_bin = bin_idx
+                    costs[0, bin_idx] += lam * scalarize_vector(norm_volume, size_key)
 
-            if best_bin is not None:
-                loads[best_bin] += volume
-                assigned_bin[item_idx] = best_bin
-                price_cache[best_bin] = self._updated_lambda(
-                    loads[best_bin], eff_caps[best_bin], lambda_scale
+            feasible_row = np.asarray(
+                inst.offline_feasible.feasible[item_idx, :cols],
+                dtype=int,
+            ).reshape(1, -1)
+            data = build_offline_milp_data_from_arrays(
+                volumes=np.asarray(volume, dtype=float).reshape(1, -1),
+                costs=costs,
+                feasible=feasible_row,
+                capacities=remaining,
+                fallback_idx=fallback_idx,
+                fallback_capacity=self.cfg.problem.fallback_capacity_offline,
+                slack_enforce=False,
+                slack_fraction=0.0,
+            )
+            step_state, step_info = solver.solve_from_data(data)
+            if not step_info.feasible:
+                raise ValueError(f"Item {item_idx} cannot be assigned to any feasible bin.")
+            chosen_bin = step_state.assigned_bin.get(0)
+            if chosen_bin is None:
+                raise ValueError(f"Item {item_idx} could not be assigned by MILP.")
+
+            assigned_bin[item_idx] = chosen_bin
+            if chosen_bin < regular_bins:
+                loads[chosen_bin] += volume
+                price_cache[chosen_bin] = self._updated_lambda(
+                    loads[chosen_bin], eff_caps[chosen_bin], lambda_scale
                 )
-                continue
-
-            if (
-                self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
-                and inst.offline_feasible.feasible[item_idx, fallback_idx] == 1
-            ):
+            elif fallback_idx >= 0 and chosen_bin == fallback_idx:
                 loads[fallback_idx] += volume
-                assigned_bin[item_idx] = fallback_idx
-                continue
-
-            raise ValueError(f"Item {item_idx} cannot be assigned to any feasible bin.")
 
         runtime = time.perf_counter() - start_time
         obj_value = self._calculate_objective(assigned_bin, inst)
