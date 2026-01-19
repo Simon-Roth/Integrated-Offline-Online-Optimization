@@ -73,6 +73,9 @@ dla:
   min_phase_len: 25       # optional lower boufnd on phase length
   use_offline_slack: true
 
+sim_dual:
+  saa_samples: 30
+
 primal_dual:
   eta_mode: "sqrt"    # "constant" | "linear" | "sqrt" | "exponential"
   eta0: 1e-05

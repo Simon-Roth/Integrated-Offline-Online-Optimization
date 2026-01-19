@@ -254,7 +254,7 @@ Located in `binpacking/online/online_heuristics/`:
 Computes dual prices for sim_base:
 
 - uses the realized offline state to compute residual capacities,
-- builds a fractional LP for online items,
+- builds a fractional LP for a sampled set of online items (same horizon, new seed),
 - allows fallback in the pricing LP (to guarantee sucessfull computation) when a fallback bin exists, penalized by `cfg.costs.huge_fallback`,
 - writes prices to `binpacking/results/sim_base.json`.
 

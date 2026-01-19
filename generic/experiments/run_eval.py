@@ -14,6 +14,7 @@ from generic.data.instance_generators import generate_instance_with_online
 from generic.data.offline_milp_assembly import build_offline_milp_data
 from generic.general_utils import set_global_seed
 from generic.experiments.pipeline_registry import (
+    ONLINE_SIM_DUAL,
     online_policy_needs_prices,
     online_policy_price_path,
 )
@@ -173,7 +174,19 @@ def run_eval(
             if price_path_str is None:
                 raise ValueError(f"No price output path configured for {policy_path}")
             price_path = Path(price_path_str)
-            compute_prices(cfg, instance, offline_state, price_path)
+            # Offset the seed to ensure pricing uses a different online sample.
+            price_seed = seed + 10000
+            price_samples = 1
+            if policy_path == ONLINE_SIM_DUAL:
+                price_samples = max(1, int(cfg.sim_dual.saa_samples))
+            compute_prices(
+                cfg,
+                instance,
+                offline_state,
+                price_path,
+                sample_seed=price_seed,
+                num_samples=price_samples,
+            )
 
         online_policy = online_policy_cls(cfg)
         online_solver = OnlineSolver(cfg, online_policy)

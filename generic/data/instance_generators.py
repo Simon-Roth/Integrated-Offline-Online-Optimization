@@ -133,6 +133,45 @@ def _ensure_row_feasible(mask: np.ndarray, rng: np.random.Generator) -> None:
             j = int(rng.integers(0, col_count))
             mask[idx, j] = 1
 
+def _generate_online_phase(
+    cfg: Config,
+    rng_onl: np.random.Generator,
+    M_onl: int,
+    N: int,
+    M_off: int,
+) -> tuple[List[OnlineItem], np.ndarray, np.ndarray]:
+    base_mask_onl = (rng_onl.uniform(size=(M_onl, N)) < cfg.graphs.p_onl).astype(int)
+    _ensure_row_feasible(base_mask_onl, rng_onl)
+
+    if cfg.problem.fallback_is_enabled:
+        fallback_val = 1 if cfg.problem.fallback_allowed_online else 0
+        fallback_col = np.full((M_onl, 1), fallback_val, dtype=int)
+        feas_onl = np.hstack([base_mask_onl, fallback_col])
+    else:
+        feas_onl = base_mask_onl
+    validate_mask(feas_onl)
+
+    volumes_onl = _sample_online_volumes(cfg, rng_onl, M_onl)
+    online_items: List[OnlineItem] = []
+    for offset in range(M_onl):
+        feasible_bins = [int(bin_id) for bin_id in np.flatnonzero(base_mask_onl[offset])]
+        online_items.append(
+            OnlineItem(
+                id=M_off + offset,
+                volume=volumes_onl[offset],
+                feasible_bins=feasible_bins,
+            )
+        )
+
+    base_costs_onl = _sample_assignment_costs(cfg, rng_onl, M_onl, N)
+    if cfg.problem.fallback_is_enabled:
+        fallback_costs = np.full((M_onl, 1), cfg.costs.huge_fallback, dtype=float)
+        assign_onl = np.hstack([base_costs_onl, fallback_costs])
+    else:
+        assign_onl = base_costs_onl
+
+    return online_items, feas_onl, assign_onl
+
 def generate_instance_with_online(
     cfg: Config,
     seed: int,
@@ -214,37 +253,71 @@ def generate_instance_with_online(
 
     on_seed = seed if online_seed is None else online_seed
     rng_onl = make_rng(on_seed)
-    base_mask_onl = (rng_onl.uniform(size=(M_onl, N)) < cfg.graphs.p_onl).astype(int)
-    _ensure_row_feasible(base_mask_onl, rng_onl)
-
-    if cfg.problem.fallback_is_enabled:
-        fallback_val = 1 if cfg.problem.fallback_allowed_online else 0
-        fallback_col = np.full((M_onl, 1), fallback_val, dtype=int)
-        feas_onl = np.hstack([base_mask_onl, fallback_col])
-    else:
-        feas_onl = base_mask_onl
-    validate_mask(feas_onl)
-
-    volumes_onl = _sample_online_volumes(cfg, rng_onl, M_onl)
-    online_items: List[OnlineItem] = []
-    for offset in range(M_onl):
-        feasible_bins = [int(bin_id) for bin_id in np.flatnonzero(base_mask_onl[offset])]
-        online_items.append(
-            OnlineItem(
-                id=len(inst.offline_items) + offset,
-                volume=volumes_onl[offset],
-                feasible_bins=feasible_bins,
-            )
-        )
-
-    base_costs_onl = _sample_assignment_costs(cfg, rng_onl, M_onl, N)
-    if cfg.problem.fallback_is_enabled:
-        fallback_costs = np.full((M_onl, 1), cfg.costs.huge_fallback, dtype=float)
-        assign_onl = np.hstack([base_costs_onl, fallback_costs])
-    else:
-        assign_onl = base_costs_onl
+    online_items, feas_onl, assign_onl = _generate_online_phase(
+        cfg, rng_onl, M_onl, N, len(inst.offline_items)
+    )
 
     inst.online_items = online_items
     inst.online_feasible = FeasibleGraph(feasible=feas_onl)
     inst.costs.assignment_costs = np.vstack([inst.costs.assignment_costs, assign_onl])
     return inst
+
+
+def resample_online_items(
+    cfg: Config,
+    instance: Instance,
+    *,
+    seed: Optional[int] = None,
+    M_onl: Optional[int] = None,
+) -> Instance:
+    """
+    Return a copy of `instance` with the same offline part but freshly sampled online items.
+    """
+    M_off = len(instance.offline_items)
+    N = len(instance.bins)
+    M_onl = len(instance.online_items) if M_onl is None else int(M_onl)
+
+    if M_onl <= 0:
+        offline_costs = np.asarray(
+            instance.costs.assignment_costs[:M_off, :], dtype=float
+        )
+        costs = Costs(
+            assignment_costs=offline_costs,
+            reassignment_penalty=instance.costs.reassignment_penalty,
+            penalty_mode=instance.costs.penalty_mode,
+            per_volume_scale=instance.costs.per_volume_scale,
+            huge_fallback=instance.costs.huge_fallback,
+        )
+        return Instance(
+            bins=instance.bins,
+            offline_items=instance.offline_items,
+            costs=costs,
+            offline_feasible=instance.offline_feasible,
+            fallback_bin_index=instance.fallback_bin_index,
+            online_items=[],
+            online_feasible=None,
+        )
+
+    rng_onl = make_rng(seed)
+    online_items, feas_onl, assign_onl = _generate_online_phase(
+        cfg, rng_onl, M_onl, N, M_off
+    )
+
+    offline_costs = np.asarray(instance.costs.assignment_costs[:M_off, :], dtype=float)
+    assign = np.vstack([offline_costs, assign_onl])
+    costs = Costs(
+        assignment_costs=assign,
+        reassignment_penalty=instance.costs.reassignment_penalty,
+        penalty_mode=instance.costs.penalty_mode,
+        per_volume_scale=instance.costs.per_volume_scale,
+        huge_fallback=instance.costs.huge_fallback,
+    )
+    return Instance(
+        bins=instance.bins,
+        offline_items=instance.offline_items,
+        costs=costs,
+        offline_feasible=instance.offline_feasible,
+        fallback_bin_index=instance.fallback_bin_index,
+        online_items=online_items,
+        online_feasible=FeasibleGraph(feasible=feas_onl),
+    )

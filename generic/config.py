@@ -135,6 +135,13 @@ class DLAConfig:
     use_offline_slack: bool = True
 
 @dataclass
+class SimDualConfig:
+    """
+    Controls SAA settings for SimDual pricing.
+    """
+    saa_samples: int = 1
+
+@dataclass
 class PrimalDualConfig:
     """
     Primal-dual online MILP controls.
@@ -195,6 +202,7 @@ class Config:
     slack: SlackConfig
     util_pricing: UtilizationPricingConfig
     dla: DLAConfig
+    sim_dual: SimDualConfig
     primal_dual: PrimalDualConfig
     solver: SolverConfig
     heuristics: HeuristicConfig
@@ -214,6 +222,7 @@ def load_config_data(data: dict) -> Config:
         slack=SlackConfig(**data["slack"]),
         util_pricing=UtilizationPricingConfig(**data.get("util_pricing", {})),
         dla=DLAConfig(**data.get("dla", {})),
+        sim_dual=SimDualConfig(**data.get("sim_dual", {})),
         primal_dual=PrimalDualConfig(**data.get("primal_dual", {})),
         solver=SolverConfig(**data.get("solver", {})),
         heuristics=HeuristicConfig(**data.get("heuristics", {})),

@@ -73,7 +73,7 @@ def default_registry() -> PipelineRegistry:
     online_specs = [
         ("rolling_horizon_milp", ONLINE_ROLLING_MILP),
         ("cost_best_fit", ONLINE_CABF),
-        ("sim_base", ONLINE_SIM_BASE),
+        #("sim_base", ONLINE_SIM_BASE),
         ("sim_dual", ONLINE_SIM_DUAL),
         ("dynamic_learning", ONLINE_DYNAMIC_LEARNING),
         ('primal_dual',ONLINE_PRIMAL_DUAL)
