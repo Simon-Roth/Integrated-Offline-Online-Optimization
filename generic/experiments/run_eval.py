@@ -106,10 +106,10 @@ def _build_run_summary(
     return {
         "seed": seed,
         "problem": {
-            "N": len(instance.bins),
+            "n": int(instance.n),
             "M_off": len(instance.offline_items),
             "M_on": len(instance.online_items),
-            "dimensions": int(instance.bins[0].capacity.shape[0]) if instance.bins else 1,
+            "m": int(instance.m),
         },
         "offline": {
             "status": offline_info.status,
@@ -150,7 +150,7 @@ def run_eval(
         instance = generate_instance_with_online(cfg, seed=seed, M_onl=M_onl)
         offline_solver = offline_solver_cls(cfg)
         # the following check is here because we have some binpacking specific offline algos here in the generic/pipeline_registry.py
-        # these do not have a solve_from_data method (working just on A,b,c) but work on instance (volumes, capacities, ...) for simplicity and understanding
+        # These do not have a solve_from_data method (working just on A,b,c) but work on instance (A_cap, b, ...) for simplicity.
         if hasattr(offline_solver, "solve_from_data"):
             data = build_offline_milp_data(instance, cfg)
             warm_start = None
@@ -167,6 +167,7 @@ def run_eval(
         policy_path = online_policy_name
         if policy_path is None:
             policy_path = f"{online_policy_cls.__module__}.{online_policy_cls.__name__}"
+        policy_kwargs: Dict[str, Any] = {}
         if policy_path and online_policy_needs_prices(policy_path):
             from binpacking.online.prices import compute_prices
 
@@ -177,18 +178,34 @@ def run_eval(
             # Offset the seed to ensure pricing uses a different online sample.
             price_seed = seed + 10000
             price_samples = 1
+            sample_online_caps = True
+            sample_online_costs = True
             if policy_path == ONLINE_SIM_DUAL:
                 price_samples = max(1, int(cfg.sim_dual.saa_samples))
+                sample_online_caps = bool(cfg.sim_dual.sample_online_caps)
+                sample_online_costs = bool(cfg.sim_dual.sample_online_costs)
             compute_prices(
                 cfg,
                 instance,
                 offline_state,
                 price_path,
+                sample_online_caps=sample_online_caps,
+                sample_online_costs=sample_online_costs,
                 sample_seed=price_seed,
                 num_samples=price_samples,
             )
+            policy_kwargs["price_path"] = price_path
 
-        online_policy = online_policy_cls(cfg)
+        if policy_kwargs:
+            try:
+                online_policy = online_policy_cls(cfg, **policy_kwargs)
+            except TypeError as exc:
+                raise ValueError(
+                    f"{online_policy_cls.__name__} does not accept price_path but "
+                    f"pricing was requested for policy '{policy_path}'."
+                ) from exc
+        else:
+            online_policy = online_policy_cls(cfg)
         online_solver = OnlineSolver(cfg, online_policy)
         final_state, online_info = online_solver.run(instance, offline_state)
 

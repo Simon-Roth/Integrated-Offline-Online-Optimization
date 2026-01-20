@@ -12,6 +12,7 @@ from generic.models import AssignmentState, Instance
 from generic.offline.offline_solver import OfflineMILPSolver
 from generic.offline.offline_policies import BaseOfflinePolicy
 from generic.offline.models import OfflineSolutionInfo
+from binpacking.block_utils import block_dim, extract_volume, split_capacities
 
 
 class UtilizationPricedDecreasing(BaseOfflinePolicy):
@@ -33,23 +34,24 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
         start_time = time.perf_counter()
 
         size_key = self.cfg.heuristics.size_key
+        n = inst.n
+        m = inst.m
+        d = block_dim(n, m)
         items_sorted: List[Tuple[int, np.ndarray]] = sorted(
-            ((idx, item.volume) for idx, item in enumerate(inst.offline_items)),
+            ((idx, extract_volume(item.cap_matrix, n, m)) for idx, item in enumerate(inst.offline_items)),
             key=lambda pair: scalarize_vector(pair[1], size_key),
             reverse=True,
         )
 
-        regular_bins = len(inst.bins)
-        fallback_idx = inst.fallback_bin_index
-        bins_total = regular_bins + (1 if fallback_idx >= 0 else 0)
-        dims = inst.bins[0].capacity.shape[0] if inst.bins else 1
-        loads = np.zeros((bins_total, dims))
-        assigned_bin: Dict[int, int] = {}
+        regular_actions = n
+        fallback_idx = inst.fallback_action_index
+        loads = np.zeros((regular_actions, d))
+        assigned_action: Dict[int, int] = {}
         if len(inst.offline_items) == 0:
             runtime = time.perf_counter() - start_time
             state = AssignmentState(
-                load=loads,
-                assigned_bin=assigned_bin,
+                load=loads.reshape(-1),
+                assigned_action=assigned_action,
                 offline_evicted=set(),
             )
             info = OfflineSolutionInfo(
@@ -61,80 +63,75 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
             )
             return state, info
 
-        eff_caps = [
-            effective_capacity(
-                bin_spec.capacity,
-                self.cfg.slack.enforce_slack,
-                self.cfg.slack.fraction,
-            )
-            for bin_spec in inst.bins
-        ]
-        avg_cost = float(np.mean(inst.costs.assignment_costs[: len(inst.offline_items), :regular_bins]))
+        eff_caps = effective_capacity(
+            split_capacities(inst.b, n),
+            self.cfg.slack.enforce_slack,
+            self.cfg.slack.fraction,
+        )
+        avg_cost = float(np.mean(inst.costs.assignment_costs[: len(inst.offline_items), :regular_actions]))
         if not np.isfinite(avg_cost) or avg_cost <= 0.0:
             raise ValueError('Negative or infinite mean cost not fit for UtilDecreasing')
             avg_cost = 1.0
         cost_scale = avg_cost
         lambda_scale = 1.0
         if self.cfg.util_pricing.vector_prices:
-            price_cache = np.zeros((regular_bins, dims))
+            price_cache = np.zeros((regular_actions, d))
         else:
-            price_cache = np.zeros(regular_bins)
+            price_cache = np.zeros(regular_actions)
 
         solver = OfflineMILPSolver(self.cfg, log_to_console=False)
-        cols = regular_bins + (1 if fallback_idx >= 0 else 0)
+        cols = regular_actions + (1 if fallback_idx >= 0 else 0)
 
         for item_idx, volume in items_sorted:
-            remaining = np.maximum(0.0, np.asarray(eff_caps, dtype=float) - loads[:regular_bins])
+            remaining = np.maximum(0.0, np.asarray(eff_caps, dtype=float) - loads)
             costs = np.asarray(inst.costs.assignment_costs[item_idx, :cols], dtype=float).reshape(1, -1)
             costs = costs / cost_scale
 
-            for bin_idx in range(regular_bins):
-                cap = np.asarray(eff_caps[bin_idx], dtype=float)
+            for action_idx in range(regular_actions):
+                cap = np.asarray(eff_caps[action_idx], dtype=float)
                 denom = np.where(cap > 0.0, cap, 1.0)
                 norm_volume = volume / denom
                 if self.cfg.util_pricing.vector_prices:
-                    lam_vec = price_cache[bin_idx]
-                    costs[0, bin_idx] += float(np.dot(lam_vec, norm_volume))
+                    lam_vec = price_cache[action_idx]
+                    costs[0, action_idx] += float(np.dot(lam_vec, norm_volume))
                 else:
-                    lam = float(price_cache[bin_idx])
-                    costs[0, bin_idx] += lam * scalarize_vector(norm_volume, size_key)
+                    lam = float(price_cache[action_idx])
+                    costs[0, action_idx] += lam * scalarize_vector(norm_volume, size_key)
 
             feasible_row = np.asarray(
                 inst.offline_feasible.feasible[item_idx, :cols],
                 dtype=int,
             ).reshape(1, -1)
+            cap_matrix = inst.offline_items[item_idx].cap_matrix
             data = build_offline_milp_data_from_arrays(
-                volumes=np.asarray(volume, dtype=float).reshape(1, -1),
+                cap_matrices=cap_matrix.reshape(1, *cap_matrix.shape),
                 costs=costs,
                 feasible=feasible_row,
-                capacities=remaining,
+                b=remaining.reshape(-1),
                 fallback_idx=fallback_idx,
-                fallback_capacity=self.cfg.problem.fallback_capacity_offline,
                 slack_enforce=False,
                 slack_fraction=0.0,
             )
             step_state, step_info = solver.solve_from_data(data)
             if not step_info.feasible:
                 raise ValueError(f"Item {item_idx} cannot be assigned to any feasible bin.")
-            chosen_bin = step_state.assigned_bin.get(0)
-            if chosen_bin is None:
+            chosen_action = step_state.assigned_action.get(0)
+            if chosen_action is None:
                 raise ValueError(f"Item {item_idx} could not be assigned by MILP.")
 
-            assigned_bin[item_idx] = chosen_bin
-            if chosen_bin < regular_bins:
-                loads[chosen_bin] += volume
-                price_cache[chosen_bin] = self._updated_lambda(
-                    loads[chosen_bin], eff_caps[chosen_bin], lambda_scale
+            assigned_action[item_idx] = chosen_action
+            if chosen_action < regular_actions:
+                loads[chosen_action] += volume
+                price_cache[chosen_action] = self._updated_lambda(
+                    loads[chosen_action], eff_caps[chosen_action], lambda_scale
                 )
-            elif fallback_idx >= 0 and chosen_bin == fallback_idx:
-                loads[fallback_idx] += volume
 
         runtime = time.perf_counter() - start_time
-        obj_value = self._calculate_objective(assigned_bin, inst)
+        obj_value = self._calculate_objective(assigned_action, inst)
 
         state = AssignmentState(
-            load=loads,
-            assigned_bin=assigned_bin,
+            load=loads.reshape(-1),
+            assigned_action=assigned_action,
             offline_evicted=set(),
         )
         info = OfflineSolutionInfo(
@@ -161,13 +158,13 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
         return scale * (util_scalar ** self.price_exponent)
 
     def _calculate_objective(
-        self, assigned_bin: Dict[int, int], inst: Instance
+        self, assigned_action: Dict[int, int], inst: Instance
     ) -> float:
         total_cost = 0.0
-        fallback_idx = len(inst.bins)
-        for item_idx, bin_idx in assigned_bin.items():
-            if bin_idx < fallback_idx:
-                total_cost += float(inst.costs.assignment_costs[item_idx, bin_idx])
+        fallback_idx = inst.fallback_action_index
+        for item_idx, action_idx in assigned_action.items():
+            if action_idx < fallback_idx or fallback_idx < 0:
+                total_cost += float(inst.costs.assignment_costs[item_idx, action_idx])
             else:
                 total_cost += inst.costs.huge_fallback
         return total_cost

@@ -61,7 +61,7 @@ def _build_full_horizon_instance(instance: Instance) -> Instance:
     solves the full-horizon optimum.
     """
     offline_specs = list(instance.offline_items)
-    online_specs = [ItemSpec(id=item.id, volume=item.volume) for item in instance.online_items]
+    online_specs = [ItemSpec(id=item.id, cap_matrix=item.cap_matrix) for item in instance.online_items]
     all_items = offline_specs + online_specs
 
     offline_feas = instance.offline_feasible.feasible
@@ -75,16 +75,18 @@ def _build_full_horizon_instance(instance: Instance) -> Instance:
         assignment_costs=instance.costs.assignment_costs.copy(),
         reassignment_penalty=instance.costs.reassignment_penalty,
         penalty_mode=instance.costs.penalty_mode,
-        per_volume_scale=instance.costs.per_volume_scale,
+        per_usage_scale=instance.costs.per_usage_scale,
         huge_fallback=instance.costs.huge_fallback,
     )
 
     return Instance(
-        bins=instance.bins,
+        n=instance.n,
+        m=instance.m,
+        b=instance.b.copy(),
         offline_items=all_items,
         costs=costs,
         offline_feasible=FeasibleGraph(feasible=feas_full),
-        fallback_bin_index=instance.fallback_bin_index,
+        fallback_action_index=instance.fallback_action_index,
         online_items=[],
         online_feasible=None,
     )

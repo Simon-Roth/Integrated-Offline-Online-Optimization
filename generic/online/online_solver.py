@@ -52,14 +52,7 @@ class OnlineSolver:
             feasible_matrix = instance.online_feasible.feasible
 
         state = state_utils.clone_state(initial_state)
-        if (
-            instance.fallback_bin_index >= 0
-            and state.load.shape[0] == len(instance.bins)
-        ):
-            # Ensure fallback row exists when a fallback bin is enabled.
-            zeros = np.zeros((1, state.load.shape[1]), dtype=state.load.dtype)
-            state.load = np.vstack([state.load, zeros])
-        volume_lookup = state_utils.build_volume_lookup(instance)
+        cap_lookup = state_utils.build_cap_lookup(instance)
         decisions: List[Decision] = []
         total_objective = 0.0
         eviction_events = 0
@@ -78,12 +71,12 @@ class OnlineSolver:
 
             decision = None
             try:
-                decision = self.policy.select_bin(item, state, instance, feasible_row)
+                decision = self.policy.select_action(item, state, instance, feasible_row)
             except PolicyInfeasibleError:
                 decision = None
 
             needs_fallback = decision is None or (
-                not self.cfg.problem.binpacking
+                not self.cfg.problem.allow_reassignment
                 and (decision.evicted_offline or decision.reassignments)
             )
             if needs_fallback:
@@ -103,7 +96,7 @@ class OnlineSolver:
                 item,
                 state,
                 instance,
-                volume_lookup,
+                cap_lookup,
             )
             decisions.append(decision)
             total_objective += decision.incremental_cost
@@ -129,7 +122,7 @@ class OnlineSolver:
     ) -> Decision | None:
         if not self._can_fallback_online(instance, feasible_row):
             return None
-        fallback_idx = instance.fallback_bin_index
+        fallback_idx = instance.fallback_action_index
         fallback_cost = self._fallback_cost(instance, item.id, fallback_idx)
         return Decision(
             placed_item=(item.id, fallback_idx),
@@ -147,7 +140,7 @@ class OnlineSolver:
             return False
         if not self.cfg.problem.fallback_allowed_online:
             return False
-        fallback_idx = instance.fallback_bin_index
+        fallback_idx = instance.fallback_action_index
         if fallback_idx < 0:
             return False
         if feasible_row is None:

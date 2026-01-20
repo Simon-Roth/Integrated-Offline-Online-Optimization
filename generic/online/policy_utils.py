@@ -34,7 +34,7 @@ def current_feasible_row(
     cfg: Config,
     item: OnlineItem,
     feasible_row: Optional[np.ndarray],
-    N: int,
+    n: int,
     cols: int,
     fallback_idx: int,
 ) -> np.ndarray:
@@ -43,25 +43,25 @@ def current_feasible_row(
         row = np.asarray(feasible_row, dtype=int).reshape(-1)
         if row.size == cols:
             if row.sum() == 0:
-                raise PolicyInfeasibleError("No feasible bin for current item.")
+                raise PolicyInfeasibleError("No feasible action for current item.")
             return row.reshape(1, -1)
-        if row.size == N:
-            if cols > N:
+        if row.size == n:
+            if cols > n:
                 fallback_val = 1 if cfg.problem.fallback_allowed_online else 0
                 row = np.concatenate([row, np.array([fallback_val], dtype=int)])
             if row.sum() == 0:
-                raise PolicyInfeasibleError("No feasible bin for current item.")
+                raise PolicyInfeasibleError("No feasible action for current item.")
             return row.reshape(1, -1)
-        raise ValueError(f"Feasible row has length {row.size}, expected {N} or {cols}.")
+        raise ValueError(f"Feasible row has length {row.size}, expected {n} or {cols}.")
 
     row = np.zeros((cols,), dtype=int)
-    for bin_id in item.feasible_bins:
-        if 0 <= bin_id < N:
-            row[bin_id] = 1
-    if cols > N:
+    for action_id in item.feasible_actions:
+        if 0 <= action_id < n:
+            row[action_id] = 1
+    if cols > n:
         row[fallback_idx] = 1 if cfg.problem.fallback_allowed_online else 0
     if row.sum() == 0:
-        raise PolicyInfeasibleError("No feasible bin for current item.")
+        raise PolicyInfeasibleError("No feasible action for current item.")
     return row.reshape(1, -1)
 
 
@@ -70,60 +70,34 @@ def remaining_capacities(
     state: AssignmentState,
     instance: Instance,
     effective_caps: Optional[np.ndarray] = None,
-) -> tuple[np.ndarray, float | np.ndarray]:
-    """Return remaining regular-bin and fallback capacities for the current state."""
-    N = len(instance.bins)
-    load = np.asarray(state.load, dtype=float)
-    if load.ndim == 1:
-        load = load.reshape((load.shape[0], -1))
-    if load.shape[0] < N:
-        raise ValueError("State load has fewer rows than number of bins.")
-
+) -> np.ndarray:
+    """Return remaining resource capacities (b - usage) for the current state."""
+    load = np.asarray(state.load, dtype=float).reshape(-1)
+    b_vec = np.asarray(instance.b, dtype=float).reshape(-1)
+    if load.shape[0] != b_vec.shape[0]:
+        raise ValueError("State load and b must have the same length.")
     if effective_caps is None:
-        caps = np.asarray([b.capacity for b in instance.bins], dtype=float)
-        if caps.ndim == 1:
-            caps = caps.reshape((N, -1))
         enforce_slack = bool(cfg.slack.enforce_slack and cfg.slack.apply_to_online)
-        effective_caps = effective_capacity(caps, enforce_slack, cfg.slack.fraction)
-    remaining = np.maximum(0.0, effective_caps - load[:N])
-
-    fallback_idx = instance.fallback_bin_index
-    if fallback_idx < 0:
-        return remaining, 0.0
-    dims = remaining.shape[1] if remaining.size else int(load.shape[1])
-    use_slack = bool(cfg.slack.enforce_slack and cfg.slack.apply_to_online)
-    slack_fraction = cfg.slack.fraction if use_slack else 0.0
-    fallback_cap = np.asarray(cfg.problem.fallback_capacity_online, dtype=float)
-    if fallback_cap.size == 1:
-        fallback_cap = np.full((dims,), float(fallback_cap))
-    fallback_cap = fallback_cap.reshape((dims,))
-    fallback_effective = effective_capacity(
-        fallback_cap,
-        use_slack,
-        slack_fraction,
-    )
-    fallback_load = (
-        load[fallback_idx] if load.shape[0] > fallback_idx else np.zeros((dims,))
-    )
-    fallback_remaining = np.maximum(0.0, fallback_effective - fallback_load)
-    return remaining, fallback_remaining
+        effective_caps = effective_capacity(b_vec, enforce_slack, cfg.slack.fraction)
+    remaining = np.maximum(0.0, effective_caps - load)
+    return remaining
 
 
 def lookup_assignment_cost(
     cfg: Config,
     instance: Instance,
     item_id: int,
-    bin_id: int,
+    action_id: int,
 ) -> float:
-    """Return the assignment cost for item->bin (fallback uses huge_fallback)."""
+    """Return the assignment cost for item->action (fallback uses huge_fallback)."""
     costs = instance.costs.assignment_costs
     if (
         costs is not None
         and costs.size
         and item_id < costs.shape[0]
-        and bin_id < costs.shape[1]
+        and action_id < costs.shape[1]
     ):
-        return float(costs[item_id, bin_id])
-    if bin_id == instance.fallback_bin_index:
+        return float(costs[item_id, action_id])
+    if action_id == instance.fallback_action_index:
         return float(cfg.costs.huge_fallback)
     return 0.0

@@ -40,4 +40,4 @@ class OfflineMILPSolver(GenericOfflineMILPSolver):
                 "continuing without warm start."
             )
             return {}
-        return state.assigned_bin
+        return state.assigned_action

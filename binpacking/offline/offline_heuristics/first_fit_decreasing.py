@@ -6,6 +6,7 @@ from generic.models import Instance, AssignmentState
 from generic.offline.offline_policies import BaseOfflinePolicy
 from generic.general_utils import effective_capacity, scalarize_vector, vector_fits
 from generic.offline.models import OfflineSolutionInfo
+from binpacking.block_utils import block_dim, extract_volume, split_capacities
 
 class FirstFitDecreasing(BaseOfflinePolicy):
     """First-Fit Decreasing heuristic for bin packing"""
@@ -20,66 +21,64 @@ class FirstFitDecreasing(BaseOfflinePolicy):
         
         # Sort items by volume (decreasing)
         size_key = self.cfg.heuristics.size_key
+        n = inst.n
+        m = inst.m
+        d = block_dim(n, m)
         items_sorted = sorted(
             enumerate(inst.offline_items),
-            key=lambda x: scalarize_vector(x[1].volume, size_key),
+            key=lambda x: scalarize_vector(extract_volume(x[1].cap_matrix, n, m), size_key),
             reverse=True,
         )
         
         # Initialize state
-        dims = inst.bins[0].capacity.shape[0] if inst.bins else 1
-        loads = np.zeros((len(inst.bins) + 1, dims))  # +1 for fallback
-        assigned_bin = {}
+        loads = np.zeros((n, d))
+        assigned_action = {}
         
         # Effective capacities with slack
-        eff_caps = [
-            effective_capacity(
-                bin.capacity,
-                self.cfg.slack.enforce_slack,
-                self.cfg.slack.fraction,
-            )
-            for bin in inst.bins
-        ]
+        eff_caps = effective_capacity(
+            split_capacities(inst.b, n),
+            self.cfg.slack.enforce_slack,
+            self.cfg.slack.fraction,
+        )
         
         # Assign items
         for item_idx, item in items_sorted:
             assigned = False
+            volume = extract_volume(item.cap_matrix, n, m)
             
             # Try regular bins first
-            for bin_idx in range(len(inst.bins)):
+            for bin_idx in range(n):
                 # Check feasibility and capacity
                 if (
                     inst.offline_feasible.feasible[item_idx, bin_idx] == 1
-                    and vector_fits(loads[bin_idx], item.volume, eff_caps[bin_idx])
+                    and vector_fits(loads[bin_idx], volume, eff_caps[bin_idx])
                 ):
                     
-                    loads[bin_idx] += item.volume
-                    assigned_bin[item_idx] = bin_idx
+                    loads[bin_idx] += volume
+                    assigned_action[item_idx] = bin_idx
                     assigned = True
                     break
             
             # Use fallback if enabled and no regular bin found
             if not assigned:
-                fallback_idx = len(inst.bins)
                 if (
                     self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
-                    and inst.offline_feasible.feasible[item_idx, fallback_idx] == 1
+                    and inst.fallback_action_index >= 0
+                    and inst.offline_feasible.feasible[item_idx, inst.fallback_action_index] == 1
                 ):
-                    fallback_idx = len(inst.bins)
-                    loads[fallback_idx] += item.volume
-                    assigned_bin[item_idx] = fallback_idx
+                    assigned_action[item_idx] = inst.fallback_action_index
                 else:
                     raise ValueError(f"Item {item_idx} cannot be assigned (no fallback)")
         
         runtime = time.perf_counter() - start_time
         
         # Calculate objective
-        obj_value = self._calculate_objective(assigned_bin, inst)
+        obj_value = self._calculate_objective(assigned_action, inst)
         
         # Create assignment state
         state = AssignmentState(
-            load=loads,
-            assigned_bin=assigned_bin,
+            load=loads.reshape(-1),
+            assigned_action=assigned_action,
             offline_evicted=set()
         )
         
@@ -93,12 +92,13 @@ class FirstFitDecreasing(BaseOfflinePolicy):
         
         return state, info
     
-    def _calculate_objective(self, assigned_bin: Dict[int, int], inst: Instance) -> float:
+    def _calculate_objective(self, assigned_action: Dict[int, int], inst: Instance) -> float:
         """Calculate objective value"""
         total_cost = 0.0
-        for item_idx, bin_idx in assigned_bin.items():
-            if bin_idx < len(inst.bins):  # Regular bin
-                total_cost += inst.costs.assignment_costs[item_idx, bin_idx]
-            else:  # Fallback bin
+        fallback_idx = inst.fallback_action_index
+        for item_idx, action_idx in assigned_action.items():
+            if action_idx < fallback_idx or fallback_idx < 0:  # Regular action
+                total_cost += inst.costs.assignment_costs[item_idx, action_idx]
+            else:  # Fallback action
                 total_cost += inst.costs.huge_fallback
         return total_cost

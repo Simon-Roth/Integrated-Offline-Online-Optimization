@@ -15,6 +15,7 @@ from binpacking.online.state_utils import (
     TOLERANCE,
 )
 from generic.general_utils import scalarize_vector, residual_vector, vector_fits
+from binpacking.block_utils import extract_volume
 
 class SimBasePolicy(BaseOnlinePolicy):
     """
@@ -36,25 +37,27 @@ class SimBasePolicy(BaseOnlinePolicy):
             else:
                 self.lam[int(k)] = np.asarray([float(v)], dtype=float)
 
-    def select_bin(
+    def select_action(
         self,
         item: OnlineItem,
         state: AssignmentState,
         instance: Instance,
         feasible_row: Optional[np.ndarray],
     ) -> Decision:
-        fallback_idx = instance.fallback_bin_index
+        fallback_idx = instance.fallback_action_index
         candidate_bins = self._candidate_bins(item, instance, feasible_row)
         if not candidate_bins:
             raise PolicyInfeasibleError(f"No feasible regular bin for online item {item.id}")
 
+        allow_reshuffle = self.cfg.problem.allow_reassignment
         best_decision: Optional[Decision] = None
         best_score = float("inf")
 
         # First, try to place without evictions.
         for bin_id in candidate_bins:
             ctx: PlacementContext = build_context(self.cfg, instance, state)
-            if not vector_fits(ctx.loads[bin_id], item.volume, ctx.effective_caps[bin_id], TOLERANCE):
+            volume = extract_volume(item.cap_matrix, instance.n, instance.m)
+            if not vector_fits(ctx.loads[bin_id], volume, ctx.effective_caps[bin_id], TOLERANCE):
                 continue
 
             score = self._score(bin_id, item, instance)
@@ -75,6 +78,9 @@ class SimBasePolicy(BaseOnlinePolicy):
 
         if best_decision is not None:
             return best_decision
+
+        if not allow_reshuffle:
+            raise PolicyInfeasibleError(f"SimBasePolicy could not place item {item.id}")
 
         # Allow evictions if no feasible bin remained.
         for bin_id in candidate_bins:
@@ -111,8 +117,8 @@ class SimBasePolicy(BaseOnlinePolicy):
         instance: Instance,
         feasible_row: Optional[np.ndarray],
     ) -> List[int]:
-        regular_bins = len(instance.bins)
-        candidate_bins: Set[int] = set(item.feasible_bins)
+        regular_bins = instance.n
+        candidate_bins: Set[int] = set(item.feasible_actions)
         if feasible_row is not None:
             for idx, allowed in enumerate(feasible_row[:regular_bins]):
                 if allowed:
@@ -121,11 +127,12 @@ class SimBasePolicy(BaseOnlinePolicy):
 
     def _score(self, bin_id: int, item: OnlineItem, instance: Instance) -> float:
         c_ji = float(instance.costs.assignment_costs[item.id, bin_id])
-        lam_i = self.lam.get(bin_id, np.zeros_like(item.volume))
+        volume = extract_volume(item.cap_matrix, instance.n, instance.m)
+        lam_i = self.lam.get(bin_id, np.zeros_like(volume))
         if self.cfg.util_pricing.vector_prices:
-            return c_ji + float(np.dot(lam_i, item.volume))
+            return c_ji + float(np.dot(lam_i, volume))
         lam_scalar = scalarize_vector(lam_i, "max")
-        return c_ji + lam_scalar * scalarize_vector(item.volume, self.cfg.heuristics.size_key)
+        return c_ji + lam_scalar * scalarize_vector(volume, self.cfg.heuristics.size_key)
 
     def _eviction_order_desc(
         self,
@@ -155,8 +162,8 @@ class SimBasePolicy(BaseOnlinePolicy):
         volume = ctx.offline_volumes.get(offline_id, zero_vec)
         instance = ctx.instance
         feasible_row = instance.offline_feasible.feasible[offline_id]
-        regular_bins = len(instance.bins)
-        fallback_idx = instance.fallback_bin_index
+        regular_bins = instance.n
+        fallback_idx = instance.fallback_action_index
 
         best_candidate: Optional[int] = None
         best_cost = float("inf")

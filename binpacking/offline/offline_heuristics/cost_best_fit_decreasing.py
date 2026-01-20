@@ -9,6 +9,7 @@ from generic.general_utils import effective_capacity, scalarize_vector, vector_f
 from generic.models import AssignmentState, Instance
 from generic.offline.offline_policies import BaseOfflinePolicy
 from generic.offline.models import OfflineSolutionInfo
+from binpacking.block_utils import block_dim, extract_volume, split_capacities
 
 
 class CostAwareBestFitDecreasing(BaseOfflinePolicy):
@@ -25,33 +26,32 @@ class CostAwareBestFitDecreasing(BaseOfflinePolicy):
         start_time = time.perf_counter()
 
         size_key = self.cfg.heuristics.size_key
+        n = inst.n
+        m = inst.m
+        d = block_dim(n, m)
         items_sorted: List[Tuple[int, np.ndarray]] = sorted(
-            ((idx, item.volume) for idx, item in enumerate(inst.offline_items)),
+            ((idx, extract_volume(item.cap_matrix, n, m)) for idx, item in enumerate(inst.offline_items)),
             key=lambda pair: scalarize_vector(pair[1], size_key),
             reverse=True,
         )
 
-        regular_bins = len(inst.bins)
-        fallback_idx = regular_bins
-        dims = inst.bins[0].capacity.shape[0] if inst.bins else 1
-        loads = np.zeros((regular_bins + 1, dims))
-        assigned_bin: Dict[int, int] = {}
+        regular_actions = n
+        fallback_idx = inst.fallback_action_index
+        loads = np.zeros((regular_actions, d))
+        assigned_action: Dict[int, int] = {}
 
-        eff_caps = [
-            effective_capacity(
-                bin_spec.capacity,
-                self.cfg.slack.enforce_slack,
-                self.cfg.slack.fraction,
-            )
-            for bin_spec in inst.bins
-        ]
+        eff_caps = effective_capacity(
+            split_capacities(inst.b, n),
+            self.cfg.slack.enforce_slack,
+            self.cfg.slack.fraction,
+        )
 
         for item_idx, volume in items_sorted:
             best_bin = None
             best_cost = float("inf")
             best_residual = float("inf")
 
-            for bin_idx in range(regular_bins):
+            for bin_idx in range(regular_actions):
                 if inst.offline_feasible.feasible[item_idx, bin_idx] != 1:
                     continue
                 if not vector_fits(loads[bin_idx], volume, eff_caps[bin_idx], 1e-9):
@@ -69,25 +69,25 @@ class CostAwareBestFitDecreasing(BaseOfflinePolicy):
 
             if best_bin is not None:
                 loads[best_bin] += volume
-                assigned_bin[item_idx] = best_bin
+                assigned_action[item_idx] = best_bin
                 continue
 
             if (
                 self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
+                and fallback_idx >= 0
                 and inst.offline_feasible.feasible[item_idx, fallback_idx] == 1
             ):
-                loads[fallback_idx] += volume
-                assigned_bin[item_idx] = fallback_idx
+                assigned_action[item_idx] = fallback_idx
                 continue
 
             raise ValueError(f"Item {item_idx} cannot be assigned to any feasible bin.")
 
         runtime = time.perf_counter() - start_time
-        obj_value = self._calculate_objective(assigned_bin, inst)
+        obj_value = self._calculate_objective(assigned_action, inst)
 
         state = AssignmentState(
-            load=loads,
-            assigned_bin=assigned_bin,
+            load=loads.reshape(-1),
+            assigned_action=assigned_action,
             offline_evicted=set(),
         )
         info = OfflineSolutionInfo(
@@ -100,13 +100,13 @@ class CostAwareBestFitDecreasing(BaseOfflinePolicy):
         return state, info
 
     def _calculate_objective(
-        self, assigned_bin: Dict[int, int], inst: Instance
+        self, assigned_action: Dict[int, int], inst: Instance
     ) -> float:
         total_cost = 0.0
-        fallback_idx = len(inst.bins)
-        for item_idx, bin_idx in assigned_bin.items():
-            if bin_idx < fallback_idx:
-                total_cost += float(inst.costs.assignment_costs[item_idx, bin_idx])
+        fallback_idx = inst.fallback_action_index
+        for item_idx, action_idx in assigned_action.items():
+            if action_idx < fallback_idx or fallback_idx < 0:
+                total_cost += float(inst.costs.assignment_costs[item_idx, action_idx])
             else:
                 total_cost += inst.costs.huge_fallback
         return total_cost

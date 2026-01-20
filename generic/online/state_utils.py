@@ -11,16 +11,16 @@ def clone_state(state: AssignmentState) -> AssignmentState:
     """Create a deep-ish copy of the assignment state."""
     return AssignmentState(
         load=state.load.copy(),
-        assigned_bin=dict(state.assigned_bin),
+        assigned_action=dict(state.assigned_action),
         offline_evicted=set(state.offline_evicted),
     )
 
 
-def build_volume_lookup(instance: Instance) -> Dict[int, np.ndarray]:
-    """Map item_id -> volume vector for both offline and online items."""
-    lookup: Dict[int, np.ndarray] = {item.id: item.volume for item in instance.offline_items}
+def build_cap_lookup(instance: Instance) -> Dict[int, np.ndarray]:
+    """Map item_id -> A_t^{cap} for both offline and online items."""
+    lookup: Dict[int, np.ndarray] = {item.id: item.cap_matrix for item in instance.offline_items}
     for online_item in instance.online_items or []:
-        lookup[online_item.id] = online_item.volume
+        lookup[online_item.id] = online_item.cap_matrix
     return lookup
 
 
@@ -29,81 +29,88 @@ def apply_decision(
     arriving_item: OnlineItem,
     state: AssignmentState,
     instance: Instance,
-    volume_lookup: Dict[int, np.ndarray],
+    cap_lookup: Dict[int, np.ndarray],
 ) -> None:
     """Mutate 'state' according to the decision taken for the arriving item."""
-    regular_bins = len(instance.bins)
-    fallback_idx = instance.fallback_bin_index
+    n = instance.n
+    fallback_idx = instance.fallback_action_index
 
     # Evict offline items if requested
-    for item_id, from_bin in decision.evicted_offline:
-        if item_id not in state.assigned_bin:
+    for item_id, from_action in decision.evicted_offline:
+        if item_id not in state.assigned_action:
             continue
-        current_bin = state.assigned_bin[item_id]
-        if current_bin != from_bin:
-            from_bin = current_bin
-        if item_id not in volume_lookup:
-            raise KeyError(f"Unknown volume for item {item_id}")
-        volume = volume_lookup[item_id]
-        remove_from_bin(state, from_bin, volume)
+        current_action = state.assigned_action[item_id]
+        if current_action != from_action:
+            from_action = current_action
+        if item_id not in cap_lookup:
+            raise KeyError(f"Unknown A_cap for item {item_id}")
+        cap_matrix = cap_lookup[item_id]
+        remove_from_load(state, from_action, cap_matrix, n, fallback_idx)
         state.offline_evicted.add(item_id)
-        del state.assigned_bin[item_id]
+        del state.assigned_action[item_id]
 
     # Reassign items
-    for item_id, target_bin in decision.reassignments:
-        if item_id not in volume_lookup:
-            raise KeyError(f"Unknown volume for item {item_id}")
-        volume = volume_lookup[item_id]
-        add_to_bin(state, target_bin, volume, regular_bins, fallback_idx)
-        state.assigned_bin[item_id] = target_bin
+    for item_id, target_action in decision.reassignments:
+        if item_id not in cap_lookup:
+            raise KeyError(f"Unknown A_cap for item {item_id}")
+        cap_matrix = cap_lookup[item_id]
+        add_to_load(state, target_action, cap_matrix, n, fallback_idx)
+        state.assigned_action[item_id] = target_action
 
     # Place the arriving online item
-    item_id, target_bin = decision.placed_item
+    item_id, target_action = decision.placed_item
     if item_id != arriving_item.id:
         raise ValueError(
             f"Decision item id {item_id} does not match arriving item {arriving_item.id}"
         )
-    add_to_bin(state, target_bin, arriving_item.volume, regular_bins, fallback_idx)
-    state.assigned_bin[item_id] = target_bin
+    add_to_load(state, target_action, arriving_item.cap_matrix, n, fallback_idx)
+    state.assigned_action[item_id] = target_action
 
 
-def add_to_bin(
+def add_to_load(
     state: AssignmentState,
-    bin_id: int,
-    volume: np.ndarray,
-    regular_bins: int,
+    action_id: int,
+    cap_matrix: np.ndarray,
+    n: int,
     fallback_idx: int,
 ) -> None:
-    """Increase load of bin_id (or fallback) by volume."""
-    if bin_id < 0:
-        raise ValueError(f"Negative bin index {bin_id}")
-    if bin_id < regular_bins:
-        state.load[bin_id] += volume
-    elif fallback_idx >= 0 and bin_id == fallback_idx:
-        state.load[fallback_idx] += volume
+    """Increase resource usage by the column A_t^{cap}[:, action_id]."""
+    if action_id < 0:
+        raise ValueError(f"Negative action index {action_id}")
+    if action_id < n:
+        state.load += cap_matrix[:, action_id]
+    elif fallback_idx >= 0 and action_id == fallback_idx:
+        return
     else:
         raise ValueError(
-            f"Bin id {bin_id} is invalid for instance with {regular_bins} bins "
+            f"Action id {action_id} is invalid for instance with n={n} "
             f"and fallback index {fallback_idx}"
         )
 
 
-def remove_from_bin(
+def remove_from_load(
     state: AssignmentState,
-    bin_id: int,
-    volume: np.ndarray,
+    action_id: int,
+    cap_matrix: np.ndarray,
+    n: int,
+    fallback_idx: int,
 ) -> None:
-    """Decrease load of bin_id by volume (saturating at zero)."""
-    if bin_id < 0 or bin_id >= len(state.load):
-        raise ValueError(f"Cannot remove volume from invalid bin {bin_id}")
-    state.load[bin_id] = np.maximum(0.0, state.load[bin_id] - volume)
+    """Decrease resource usage by A_t^{cap}[:, action_id] (saturating at zero)."""
+    if action_id < 0:
+        raise ValueError(f"Cannot remove from invalid action {action_id}")
+    if action_id < n:
+        state.load = np.maximum(0.0, state.load - cap_matrix[:, action_id])
+        return
+    if fallback_idx >= 0 and action_id == fallback_idx:
+        return
+    raise ValueError(f"Cannot remove from invalid action {action_id}")
 
 
 def count_fallback_items(state: AssignmentState, instance: Instance) -> int:
-    """Count how many items are currently assigned to the fallback bin."""
-    fallback_idx = instance.fallback_bin_index
+    """Count how many items are currently assigned to the fallback action."""
+    fallback_idx = instance.fallback_action_index
     if fallback_idx < 0:
         return 0
     return sum(
-        1 for bin_id in state.assigned_bin.values() if bin_id >= fallback_idx
+        1 for action_id in state.assigned_action.values() if action_id >= fallback_idx
     )

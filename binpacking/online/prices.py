@@ -10,56 +10,56 @@ from generic.data.instance_generators import resample_online_items
 from generic.data.offline_milp_assembly import build_offline_milp_data_from_arrays
 from generic.general_utils import effective_capacity
 from generic.models import AssignmentState, Instance
+from binpacking.block_utils import block_dim, extract_volume, split_capacities
 
 def _pricing_duals_saa(
     cfg: Config,
     samples: list[Instance],
     offline_state: AssignmentState,
+    base_instance: Instance,
     *,
+    sample_online_costs: bool,
     log_to_console: bool = False,
 ) -> np.ndarray:
     if not samples:
         return np.zeros((0, 0), dtype=float)
     inst0 = samples[0]
-    N = len(inst0.bins)
-    dims = inst0.bins[0].capacity.shape[0] if inst0.bins else 1
-    if N == 0:
-        return np.zeros((0, dims), dtype=float)
+    n = inst0.n
+    d = block_dim(n, inst0.m)
+    if n == 0:
+        return np.zeros((0, d), dtype=float)
 
     sample_count = max(1, len(samples))
-    fallback_idx = inst0.fallback_bin_index
-    cols = N + (1 if fallback_idx >= 0 else 0)
+    fallback_idx = inst0.fallback_action_index
+    cols = n + (1 if fallback_idx >= 0 else 0)
     M_off = len(inst0.offline_items)
-    allow_fallback = bool(cfg.problem.fallback_is_enabled and cfg.problem.fallback_allowed_online)
+    # Pricing LP allows fallback to avoid infeasibility when residual capacity is tight.
+    allow_fallback = bool(cfg.problem.fallback_is_enabled)
 
     # Effective capacities (respect slack if online should honor it)
     use_slack = cfg.slack.enforce_slack and getattr(cfg.slack, "apply_to_online", True)
     slack_fraction = cfg.slack.fraction if use_slack else 0.0
     caps_eff = np.asarray(
-        [effective_capacity(b.capacity, use_slack, slack_fraction) for b in inst0.bins],
+        effective_capacity(split_capacities(inst0.b, n), use_slack, slack_fraction),
         dtype=float,
     )
-    if caps_eff.ndim == 1:
-        caps_eff = caps_eff.reshape((N, -1))
     load = np.asarray(offline_state.load, dtype=float)
     if load.ndim == 1:
-        load = load.reshape((load.shape[0], -1))
-    load = load[:N]
+        load = load.reshape((n, d))
     residual = np.maximum(0.0, caps_eff - load)
 
-    volumes_list: list[np.ndarray] = []
+    cap_list: list[np.ndarray] = []
     costs_list: list[np.ndarray] = []
     feas_list: list[np.ndarray] = []
     for inst in samples:
         M_onl = len(inst.online_items)
         if M_onl <= 0:
             continue
-        vols = np.asarray([item.volume for item in inst.online_items], dtype=float)
-        if vols.ndim == 1:
-            vols = vols.reshape((-1, 1))
-        volumes_list.append(vols)
+        caps = np.asarray([item.cap_matrix for item in inst.online_items], dtype=float)
+        cap_list.append(caps)
+        cost_source = inst if sample_online_costs else base_instance
         costs = np.asarray(
-            inst.costs.assignment_costs[M_off : M_off + M_onl, :],
+            cost_source.costs.assignment_costs[M_off : M_off + M_onl, :],
             dtype=float,
         )
         costs_list.append(costs)
@@ -68,7 +68,7 @@ def _pricing_duals_saa(
         else:
             feas = np.ones((M_onl, cols), dtype=int)
         if fallback_idx >= 0:
-            if feas.shape[1] == N:
+            if feas.shape[1] == n:
                 fallback_val = 1 if allow_fallback else 0
                 fallback_col = np.full((M_onl, 1), fallback_val, dtype=int)
                 feas = np.hstack([feas, fallback_col])
@@ -76,21 +76,20 @@ def _pricing_duals_saa(
                 feas[:, fallback_idx] = 1 if allow_fallback else 0
         feas_list.append(feas)
 
-    if not volumes_list:
-        return np.zeros((N, dims), dtype=float)
+    if not cap_list:
+        return np.zeros((n, d), dtype=float)
 
     scale = 1.0 / float(sample_count)
-    volumes = np.vstack(volumes_list) * scale
+    cap_matrices = np.concatenate(cap_list, axis=0) * scale
     costs = np.vstack(costs_list) * scale
     feasible = np.vstack(feas_list)
 
     data = build_offline_milp_data_from_arrays(
-        volumes=volumes,
+        cap_matrices=cap_matrices,
         costs=costs,
         feasible=feasible,
-        capacities=residual,
+        b=residual.reshape(-1),
         fallback_idx=fallback_idx,
-        fallback_capacity=cfg.problem.fallback_capacity_online,
         slack_enforce=False,
         slack_fraction=0.0,
     )
@@ -108,15 +107,15 @@ def _pricing_duals_saa(
     if m.Status != GRB.OPTIMAL:
         raise RuntimeError(f"LP not optimal, status={m.Status}")
 
-    prices = np.zeros((N, dims), dtype=float)
+    prices = np.zeros((n, d), dtype=float)
     if constr is None:
         return prices
     pi = np.asarray(constr.Pi, dtype=float)
-    for i in range(N):
-        for d in range(dims):
-            row_idx = i * dims + d
+    for i in range(n):
+        for d_idx in range(d):
+            row_idx = i * d + d_idx
             if row_idx < pi.size:
-                prices[i, d] = abs(float(pi[row_idx]))
+                prices[i, d_idx] = abs(float(pi[row_idx]))
     return prices
 
 
@@ -127,24 +126,26 @@ def compute_prices(
     out_path: Path,
     *,
     log_to_console: bool = False,
-    sample_online: bool = True,
+    sample_online_caps: bool = True,
+    sample_online_costs: bool = True,
     sample_seed: int | None = None,
     num_samples: int = 1,
 ) -> dict[int, float | list[float]]:
     """
     1) Take the offline state and compute the residual problem.
-    2) Build a fractional LP for sampled ONLINE sets (regular bins 0..N-1).
-       If sample_online is True, online items are resampled using sample_seed.
+    2) Build a fractional LP for sampled ONLINE sets (regular actions 0..n-1).
+       If sample_online_caps is True, online items/feasibility are resampled using sample_seed.
+       If sample_online_costs is True, online costs are resampled per sample.
        For num_samples >= 1, solve a single SAA LP with shared capacities.
     3) Minimize assignment cost; read duals Pi of cap constraints as λ_i.
-    4) Save to JSON and return {bin_i: lambda_i} (used by sim_base/sim_dual).
+    4) Save to JSON and return {action_i: lambda_i} (used by sim_base/sim_dual).
     """
     sample_count = max(1, int(num_samples))
-    if not sample_online:
+    if not sample_online_caps:
         sample_count = 1
 
     samples: list[Instance] = []
-    if sample_online:
+    if sample_online_caps:
         for idx in range(sample_count):
             seed = None if sample_seed is None else int(sample_seed) + idx
             samples.append(
@@ -161,14 +162,16 @@ def compute_prices(
         cfg,
         samples,
         offline_state,
+        instance,
+        sample_online_costs=sample_online_costs,
         log_to_console=log_to_console,
     )
 
-    N = len(instance.bins)
-    dims = instance.bins[0].capacity.shape[0] if instance.bins else 1
+    n = instance.n
+    d = block_dim(n, instance.m)
     prices_out: dict[int, float | list[float]] = {}
-    for i in range(N):
-        if dims == 1:
+    for i in range(n):
+        if d == 1:
             prices_out[i] = float(avg[i, 0])
         else:
             prices_out[i] = [float(x) for x in avg[i]]

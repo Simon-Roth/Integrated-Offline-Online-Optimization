@@ -13,14 +13,11 @@ from generic.offline.models import OfflineSolutionInfo, _status_name
 
 class OfflineMILPSolver:
     """
-    Offline MILP für die initiale Zuordnung der OFFLINE-Items.
-
-    Eckpunkte:
-    - Regular bins: Indizes 0..N-1 (harte Kapazitäten)
-    - Fallback bin: Index N (optional; falls aktiviert)
-    - Online-Items werden später behandelt (online-Phase)
-    - Feasibility-Graph wird respektiert (über Ax <= b)
-    - Slack global konfigurierbar (Default: aus)
+    Offline MILP for the initial allocation of OFFLINE items.
+    - Regular actions: indices 0..n-1
+    - Fallback action: index n (optional; if enabled)
+    - A_t^{cap} is encoded in OfflineMILPData.cap_matrices
+    - Feasibility is enforced via Ax <= b (including one-hot equalities)
     """
 
     def __init__(
@@ -41,13 +38,13 @@ class OfflineMILPSolver:
         # werden in _build_model gesetzt:
         self.model: Optional[gp.Model] = None
         self.x: Optional[gp.MVar] = None
-        self.N: int = 0
-        self.bins_total: int = 0
+        self.n: int = 0
+        self.actions_total: int = 0
         self.M: int = 0
         self.var_shape: Tuple[int, int] = (0, 0)
         self.fallback_idx: int = -1
-        self.dimensions: int = 1
-        self.vol: Optional[np.ndarray] = None
+        self.m: int = 0
+        self.cap_matrices: Optional[np.ndarray] = None
         self.feas: Optional[np.ndarray] = None
 
     # ---------- Public API ----------
@@ -55,7 +52,7 @@ class OfflineMILPSolver:
     def solve(
         self,
         inst: Instance,
-        warm_start: Optional[Dict[int, int]] = None,  # {offline_item_id -> bin_id}
+        warm_start: Optional[Dict[int, int]] = None,  # {offline_item_id -> action_id}
     ) -> Tuple[AssignmentState, OfflineSolutionInfo]:
         """
         Modell bauen, lösen, Lösung extrahieren.
@@ -98,15 +95,15 @@ class OfflineMILPSolver:
 
     def _build_model_from_data(self, data: OfflineMILPData) -> None:
         self.var_shape = data.var_shape
-        self.M, bins_total = self.var_shape
-        self.bins_total = bins_total
-        self.N = bins_total - 1 if data.fallback_idx >= 0 else bins_total
+        self.M, actions_total = self.var_shape
+        self.actions_total = actions_total
+        self.n = actions_total - 1 if data.fallback_idx >= 0 else actions_total
         self.fallback_idx = data.fallback_idx
-        self.dimensions = data.dimensions
-        self.vol = data.volumes
+        self.m = data.m
+        self.cap_matrices = data.cap_matrices
         self.feas = data.feasible
         if self.fallback_idx >= 0:
-            assert self.fallback_idx == self.N, "Expected fallback index to be N (0-based)."
+            assert self.fallback_idx == self.n, "Expected fallback index to be n (0-based)."
 
         # Gurobi-Modell
         self.model = gp.Model("offline_initial_allocation")
@@ -128,7 +125,7 @@ class OfflineMILPSolver:
     @staticmethod
     def state_to_warm_start(state: AssignmentState) -> Dict[int, int]:
         """Convert AssignmentState to warm start format for MILP."""
-        return state.assigned_bin.copy()
+        return state.assigned_action.copy()
 
     def _generate_warm_start(self, inst: Instance) -> Dict[int, int]:
         """Generate warm start solution (override in problem-specific solvers)."""
@@ -164,27 +161,26 @@ class OfflineMILPSolver:
         # Nur wenn Gurobi eine Lösung kennt (SolCount > 0), dürfen wir var.X/ObjVal lesen.
         has_solution = (getattr(m, "SolCount", 0) is not None) and (m.SolCount > 0)
 
-        # Dense 0/1-Matrix der Größe M x (N+1) bauen (auch wenn keine Lösung existiert)
+        # Dense 0/1-Matrix of size M x (n+1) (even if no solution exists)
         x_sol = np.zeros(self.var_shape, dtype=int)
         if has_solution and self.x is not None:
             x_vec = np.asarray(self.x.X, dtype=float)
             if x_vec.size:
                 x_sol = np.rint(x_vec.reshape(self.var_shape)).astype(int)
 
-        # Loads & Zuordnungen nur berechnen, wenn eine Lösung existiert
-        load = np.zeros((self.bins_total, self.dimensions), dtype=float)
-        assigned_bin: Dict[int, int] = {}
+        # Resource usage + assignments only if a solution exists
+        load = np.zeros((self.m,), dtype=float)
+        assigned_action: Dict[int, int] = {}
         if has_solution:
+            assert self.cap_matrices is not None
             for j in range(self.M):
                 i = int(np.argmax(x_sol[j, :]))
-                assigned_bin[j] = i
-                if i < self.N:
-                    load[i] += self.vol[j]
-                elif self.fallback_idx >= 0 and i == self.fallback_idx:
-                    load[self.fallback_idx] += self.vol[j]
+                assigned_action[j] = i
+                if i < self.n:
+                    load += self.cap_matrices[j, :, i]
         state = AssignmentState(
             load=load,
-            assigned_bin=assigned_bin,
+            assigned_action=assigned_action,
             offline_evicted=set(),
         )
 

@@ -19,7 +19,7 @@ class OnlineSolutionInfo:
     total_objective:
         Sum of incremental objective contributions reported by the policy.
     fallback_items:
-        Number of items assigned to the fallback bin after the online phase (0 if disabled).
+        Number of items assigned to the fallback action after the online phase (0 if disabled).
     evicted_offline:
         Count of offline eviction events during the online phase (penalty-bearing moves).
     decisions:

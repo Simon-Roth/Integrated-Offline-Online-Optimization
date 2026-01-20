@@ -28,7 +28,7 @@ class CostAwareBestFitOnlinePolicy(BaseOnlinePolicy):
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
 
-    def select_bin(
+    def select_action(
         self,
         item: OnlineItem,
         state: AssignmentState,
@@ -39,6 +39,7 @@ class CostAwareBestFitOnlinePolicy(BaseOnlinePolicy):
         if not candidate_bins:
             raise PolicyInfeasibleError(f"No feasible regular bin for online item {item.id}")
 
+        allow_reshuffle = self.cfg.problem.allow_reassignment
         best_decision: Optional[Decision] = None
         best_cost = float("inf")
         best_residual = float("inf")
@@ -77,6 +78,11 @@ class CostAwareBestFitOnlinePolicy(BaseOnlinePolicy):
 
         if best_decision is not None:
             return best_decision
+
+        if not allow_reshuffle:
+            raise PolicyInfeasibleError(
+                f"CostAwareBestFitOnlinePolicy could not place item {item.id}"
+            )
 
         # Allow evictions if no feasible bin remained.
         for bin_id in candidate_bins:
@@ -125,20 +131,20 @@ class CostAwareBestFitOnlinePolicy(BaseOnlinePolicy):
         instance: Instance,
         feasible_row: Optional["numpy.ndarray"],
     ) -> List[int]:
-        bins: Set[int] = set(item.feasible_bins)
+        bins: Set[int] = set(item.feasible_actions)
         if feasible_row is not None:
-            regular_bins = len(instance.bins)
-            for idx, allowed in enumerate(feasible_row[:regular_bins]):
+            regular_actions = instance.n
+            for idx, allowed in enumerate(feasible_row[:regular_actions]):
                 if allowed:
                     bins.add(int(idx))
-        return sorted(b for b in bins if 0 <= b < len(instance.bins))
+        return sorted(b for b in bins if 0 <= b < instance.n)
 
     def _eviction_order_desc(
         self,
         bin_id: int,
         ctx: PlacementContext,
     ) -> List[int]:
-        regular_bins = len(ctx.instance.bins)
+        regular_bins = ctx.instance.n
         offline_ids = [
             itm_id
             for itm_id, assigned_bin in ctx.assignments.items()
@@ -162,8 +168,8 @@ class CostAwareBestFitOnlinePolicy(BaseOnlinePolicy):
         volume = ctx.offline_volumes.get(offline_id, zero_vec)
         instance = ctx.instance
         feasible_row = instance.offline_feasible.feasible[offline_id]
-        regular_bins = len(instance.bins)
-        fallback_idx = instance.fallback_bin_index
+        regular_bins = instance.n
+        fallback_idx = instance.fallback_action_index
 
         best_candidate: Optional[int] = None
         best_cost = float("inf")

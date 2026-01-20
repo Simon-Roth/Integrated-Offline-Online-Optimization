@@ -1,26 +1,24 @@
 problem:
-  N: 10
-  M_off: 60
-  dimensions: 1
-  capacities: []
-  capacity_mean: 2500.0 # if d > 1, either provide a list of means or just one (for all)
-  capacity_std: 100 # if d > 1, either provide a list of stds or just one (for all)
-  fallback_is_enabled: true # if false: no fallback bin exists (N columns only)
-  fallback_allowed_offline: true # if true: offline items may use fallback
-  fallback_allowed_online: false # if true: online items may use fallback
-  binpacking: false # if false: online policies must not evict/reassign; fallback/eviction tracking stays off
-  fallback_capacity_offline: 1000000.0 # big fallback capacity for offline MILP
-  fallback_capacity_online: 1000000.0 # placeholder for online phase
+  n: 10 # number of actions per time step (length of x_t)
+  M_off: 60 # number of offline items (t_off)
+  m: 10 # number of resource constraints (length of b). Binpacking: m = n * d
+  b: [] # capacity vector b (length m). If empty, sample from b_mean/b_std
+  b_mean: 2500.0 # mean for sampling b when b is empty
+  b_std: 100 # std for sampling b when b is empty
+  fallback_is_enabled: true # optional rejection action with high cost
+  fallback_allowed_offline: true # if true: offline items may choose rejection
+  fallback_allowed_online: false # if true: online items may choose rejection
+  allow_reassignment: false # if false: online policies must not evict/reassign offline items
 
-volumes:
-  offline_beta: [3, 7] # prob distribution for offline item vols | if d > 1, either provide a list of distr. or just one (for all)
-  offline_bounds: [30, 180] # prob bounds for offline item vols | if d > 1, either provide a list of bounds or just one (for all)
-  online_beta: [3, 7] # prob distribution for online item vols (beta draw) | if d > 1, either provide a list of distr. or just one (for all)
-  online_bounds: [30, 180] # absolute bounds for online item vols (same scale as offline) | if d > 1, either provide a list of bounds or just one (for all)
+cap_coeffs:
+  offline_beta: [3, 7] # beta distribution for A_off coefficients (binpacking: item size)
+  offline_bounds: [30, 180] # bounds for A_off coefficients
+  online_beta: [3, 7] # beta distribution for A_onl coefficients
+  online_bounds: [30, 180] # bounds for A_onl coefficients
 
-graphs:
-  p_off: 0.8 # prob that offline item can go in certain bin
-  p_onl: 0.5 # prob that online item can go in certain bin
+feasibility:
+  p_off: 0.8 # prob that an action is feasible for an offline item
+  p_onl: 0.5 # prob that an action is feasible for an online item
 
 costs:
   assign_beta: [2.0, 5.0] # beta distribution for assignment costs
@@ -37,9 +35,9 @@ costs:
   # However, minimal adaptions are needed to change that logic
 
   reassignment_penalty: 10.0
-  penalty_mode: "per_item"     # could integrate switch to 'per_volume'
-  # or dependent on volume
-  per_volume_scale: 10.0 # only active if penalty_mode is per_volume
+  penalty_mode: "per_item"     # could integrate switch to 'per_usage'
+  # or dependent on usage
+  per_usage_scale: 10.0 # only active if penalty_mode is per_usage
 
 stoch:
   horizon_dist: "fixed" # distribution of the numnber of online items M_onl (for later possible implementation)
@@ -53,15 +51,12 @@ slack:
   # fraction: 0.05
 
 heuristics: # if d > 1 
-  size_key: "max" # metric used for sorting in heuristics, e.g., for decreasing
+  size_key: "max" # metric used for sorting in heuristics, e.g., for decreasing-methods
   residual_scalarization: "max" # metric used for evaluating goodness of fit
 
 solver:
   use_warm_start: True # if True, automatically generate warm start using heuristic
   warm_start_heuristic: "CABFD" # "CABFD" or "none"
-
-eval:
-  seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
 
 util_pricing:
   update_rule: "exponential"  # "polynomial" | "exponential"
@@ -72,9 +67,14 @@ util_pricing:
 dla:
   epsilon: 0.01           # sampling fraction controlling phase boundaries
   log_prices: false      # if true, write per-phase price logs for plotting
-  output_dir: "binpacking/results/dla"
-  min_phase_len: 25       # optional lower boufnd on phase length
+  output_dir: "generic/results/dla"
+  min_phase_len: 25       # optional lower bound on phase length
   use_offline_slack: true
+
+sim_dual:
+  saa_samples: 30
+  sample_online_caps: true # if true, sample online A_t^{cap} and feasibility for SAA
+  sample_online_costs: false # if true, sample online costs; else use realized c_t
 
 primal_dual:
   eta_mode: "sqrt"    # "constant" | "linear" | "sqrt" | "exponential"
@@ -85,3 +85,7 @@ primal_dual:
   normalize_costs: false   # divide costs by a scale factor
   cost_scale_mode: "assign_mean" # "assign_mean" | "assign_bounds"
   cost_scale_min: 1e-8
+
+
+eval:
+  seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]

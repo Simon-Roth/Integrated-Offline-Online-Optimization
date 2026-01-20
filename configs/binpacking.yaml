@@ -1,3 +1,6 @@
+problem:
+  allow_reassignment: false # if false, online heuristics won't reshuffle offline items
+
 util_pricing:
   update_rule: "exponential"  # "polynomial" | "exponential"
   price_exponent: 2.0        # used when update_rule == "polynomial"

@@ -92,10 +92,10 @@ def _select_pipelines(all_specs: List[PipelineSpec], names: Sequence[str] | None
 def _scenario_problem_meta(cfg, M_onl_override: int | None) -> dict[str, Any]:
     M_onl = M_onl_override if M_onl_override is not None else cfg.stoch.horizon
     return {
-        "N": int(cfg.problem.N),
+        "n": int(cfg.problem.n),
         "M_off": int(cfg.problem.M_off),
         "M_on": int(M_onl),
-        "dimensions": int(getattr(cfg.problem, "dimensions", 1)),
+        "m": int(cfg.problem.m),
     }
 
 

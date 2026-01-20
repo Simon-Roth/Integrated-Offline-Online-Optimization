@@ -66,16 +66,16 @@ def scalarize_vector(vec: np.ndarray, mode: str) -> float:
     raise ValueError(f"Unknown scalarization mode: {mode}")
 
 
-def vector_fits(load: np.ndarray, volume: np.ndarray, capacity: np.ndarray, tol: float = 0.0) -> bool:
-    """Return True if load + volume <= capacity (component-wise)."""
-    return bool(np.all(load + volume <= capacity + tol))
+def vector_fits(load: np.ndarray, usage: np.ndarray, capacity: np.ndarray, tol: float = 0.0) -> bool:
+    """Return True if load + usage <= capacity (component-wise)."""
+    return bool(np.all(load + usage <= capacity + tol))
 
 
-def residual_vector(load: np.ndarray, volume: np.ndarray, capacity: np.ndarray) -> np.ndarray:
-    """Residual capacity after placing volume into load."""
-    return capacity - (load + volume)
+def residual_vector(load: np.ndarray, usage: np.ndarray, capacity: np.ndarray) -> np.ndarray:
+    """Residual capacity after adding usage into load."""
+    return capacity - (load + usage)
 
 
-def volume_total(volume: np.ndarray) -> float:
-    """Total volume for per-volume penalties (L1)."""
-    return float(np.sum(np.asarray(volume, dtype=float)))
+def usage_total(usage: np.ndarray) -> float:
+    """Total usage for per-usage penalties (L1)."""
+    return float(np.sum(np.asarray(usage, dtype=float)))

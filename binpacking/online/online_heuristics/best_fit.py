@@ -17,6 +17,7 @@ from binpacking.online.state_utils import (
     TOLERANCE,
 )
 from generic.general_utils import scalarize_vector, residual_vector, vector_fits
+from binpacking.block_utils import extract_volume
 
 
 class BestFitOnlinePolicy(BaseOnlinePolicy):
@@ -29,7 +30,7 @@ class BestFitOnlinePolicy(BaseOnlinePolicy):
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
 
-    def select_bin(
+    def select_action(
         self,
         item: OnlineItem,
         state: AssignmentState,
@@ -41,13 +42,15 @@ class BestFitOnlinePolicy(BaseOnlinePolicy):
         if not candidate_bins:
             raise PolicyInfeasibleError(f"No feasible regular bin for online item {item.id}")
 
+        allow_reshuffle = self.cfg.problem.allow_reassignment
         residual_mode = self.cfg.heuristics.residual_scalarization
+        volume = extract_volume(item.cap_matrix, instance.n, instance.m)
         fits: List[tuple[float, int]] = []
         overflows: List[tuple[float, int]] = []
         for bin_id in candidate_bins:
-            residual_vec = residual_vector(ctx.loads[bin_id], item.volume, ctx.effective_caps[bin_id])
+            residual_vec = residual_vector(ctx.loads[bin_id], volume, ctx.effective_caps[bin_id])
             residual_score = scalarize_vector(residual_vec, residual_mode)
-            if vector_fits(ctx.loads[bin_id], item.volume, ctx.effective_caps[bin_id], TOLERANCE):
+            if vector_fits(ctx.loads[bin_id], volume, ctx.effective_caps[bin_id], TOLERANCE):
                 fits.append((residual_score, bin_id))
             else:
                 overflows.append((residual_score, bin_id))
@@ -66,17 +69,18 @@ class BestFitOnlinePolicy(BaseOnlinePolicy):
                 return decision
 
         # Otherwise, attempt bins in order of smallest overflow, allowing evictions
-        for residual, target_bin in sorted(overflows, key=lambda pair: (pair[0], pair[1]), reverse=True):
-            decision = execute_placement(
-                target_bin,
-                item,
-                ctx,
-                eviction_order_fn=self._eviction_order_desc,
-                destination_fn=self._select_reassignment_bin,
-                allow_eviction=True,
-            )
-            if decision is not None:
-                return decision
+        if allow_reshuffle:
+            for residual, target_bin in sorted(overflows, key=lambda pair: (pair[0], pair[1]), reverse=True):
+                decision = execute_placement(
+                    target_bin,
+                    item,
+                    ctx,
+                    eviction_order_fn=self._eviction_order_desc,
+                    destination_fn=self._select_reassignment_bin,
+                    allow_eviction=True,
+                )
+                if decision is not None:
+                    return decision
 
         raise PolicyInfeasibleError(f"BestFitOnlinePolicy could not place item {item.id}")
 
@@ -90,21 +94,21 @@ class BestFitOnlinePolicy(BaseOnlinePolicy):
         instance: Instance,
         feasible_row: Optional["numpy.ndarray"],
     ) -> List[int]:
-        bins: Set[int] = set(item.feasible_bins)
+        bins: Set[int] = set(item.feasible_actions)
         if feasible_row is not None:
-            regular_bins = len(instance.bins)
+            regular_bins = instance.n
             for idx, allowed in enumerate(feasible_row[:regular_bins]):
                 if allowed:
                     bins.add(int(idx))
-        return sorted(b for b in bins if 0 <= b < len(instance.bins))
+        return sorted(b for b in bins if 0 <= b < instance.n)
 
     def _eviction_order_desc(
         self,
         bin_id: int,
         ctx: PlacementContext,
     ) -> List[int]:
-        regular_bins = len(ctx.instance.bins)
-        fallback_idx = ctx.instance.fallback_bin_index
+        regular_bins = ctx.instance.n
+        fallback_idx = ctx.instance.fallback_action_index
         offline_ids = [
             itm_id
             for itm_id, assigned_bin in ctx.assignments.items()
@@ -128,8 +132,8 @@ class BestFitOnlinePolicy(BaseOnlinePolicy):
         volume = ctx.offline_volumes.get(offline_id, zero_vec)
         instance = ctx.instance
         feasible_row = instance.offline_feasible.feasible[offline_id]
-        regular_bins = len(instance.bins)
-        fallback_idx = instance.fallback_bin_index
+        regular_bins = instance.n
+        fallback_idx = instance.fallback_action_index
 
         best_candidate: Optional[int] = None
         best_residual = float("inf")

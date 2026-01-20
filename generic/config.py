@@ -11,39 +11,35 @@ from pathlib import Path
 class ProblemConfig:
     """
     Core structural parameters for an instance.
-    - N: number of regular bins
+    - n: number of actions per time step (length of x_t)
     - M_off: number of offline items
-    - dimensions: number of dimensions for capacities/volumes
-    - capacities: list of bin capacities (len == N) (optional if using distribution)
-    - capacity_mean/std: parameters to synthesize capacities when list shorter than N
-    - fallback_is_enabled: if False, no fallback bin exists in the instance
-    - fallback_allowed_offline: if True, offline items may use the fallback bin
-    - fallback_allowed_online: if True, online items may use the fallback bin
-    - binpacking: enable binpacking-specific logic (evictions, fallback tracking)
-    - fallback_capacity_offline: fallback bin capacity for offline MILP (scalar or per-dim)
-    - fallback_capacity_online: fallback capacity placeholder for online (scalar or per-dim)
+    - m: number of capacity constraints (length of b)
+    - b: capacity vector b (len == m); if empty, sampled from b_mean/b_std
+    - b_mean/std: parameters to synthesize b when list shorter than m
+    - fallback_is_enabled: if False, no rejection action exists in the instance
+    - fallback_allowed_offline: if True, offline items may use the rejection action
+    - fallback_allowed_online: if True, online items may use the rejection action
+    - allow_reassignment: if True, online policies may evict/reassign offline items
     """
-    N: int
+    n: int
     M_off: int
-    capacities: List[float]
-    dimensions: int = 1
-    capacity_mean: float = 1.0
-    capacity_std: float = 0.1
+    m: int
+    b: List[float]
+    b_mean: float = 1.0
+    b_std: float = 0.1
     fallback_is_enabled: bool = True
     fallback_allowed_offline: bool = True
     fallback_allowed_online: bool = False
-    binpacking: bool = True
-    fallback_capacity_offline: float | List[float] = 1e6
-    fallback_capacity_online: float | List[float] = 1e6
+    allow_reassignment: bool = False
 
 @dataclass
-class VolumeGenerationConfig:
+class CapCoeffGenerationConfig:
     """
-    Volume distributions for offline and online items.
-    - offline_beta: Beta distribution parameters (shared or per-dimension).
-    - offline_bounds: lower/upper bounds (shared or per-dimension).
-    - online_beta: Beta distribution parameters (shared or per-dimension).
-    - online_bounds: lower/upper bounds (shared or per-dimension).
+    Coefficient distributions for A_t^{cap} (binpacking interprets these as sizes).
+    - offline_beta: Beta distribution parameters for offline coefficients.
+    - offline_bounds: lower/upper bounds for offline coefficients.
+    - online_beta: Beta distribution parameters for online coefficients.
+    - online_bounds: lower/upper bounds for online coefficients.
     """
     offline_beta: Tuple[float, float] = (1, 1)
     offline_bounds: Tuple[float, float] = (0.05, 0.3)
@@ -51,11 +47,11 @@ class VolumeGenerationConfig:
     online_bounds: Tuple[float, float] = (0.05, 0.3)
 
 @dataclass
-class GraphGenerationConfig:
+class FeasibilityGenerationConfig:
     """
     Feasibility graph parameters:
-    - p_off: edge prob for G_off (item j can be assigned to bin i)
-    - p_onl: edge prob for G_onl^(k) per arrival
+    - p_off: probability an action is feasible for an offline item
+    - p_onl: probability an action is feasible for an online item
     """
     p_off: float = 0.7
     p_onl: float = 0.5
@@ -68,16 +64,16 @@ class CostConfig:
     - assign_bounds: lower/upper bounds applied to assignment costs
     - huge_fallback: large fallback cost to ensure feasibility but discourage use
     - reassignment_penalty: base penalty for evicting an OFFLINE item (per default PER-ITEM)
-    - penalty_mode: 'per_item' | 'per_volume'  (we default to per_item but can switch later)
-    - per_volume_scale: if penalty_mode == 'per_volume', use penalty = per_volume_scale * volume
+    - penalty_mode: 'per_item' | 'per_usage'  (we default to per_item but can switch later)
+    - per_usage_scale: if penalty_mode == 'per_usage', use penalty = per_usage_scale * ||A_t^{cap}||_1
     """
     base_assign_range: Tuple[float, float] = (1.0, 5.0)
     assign_beta: Tuple[float, float] = (1.0, 1.0)
     assign_bounds: Tuple[float, float] = (1.0, 5.0)
     huge_fallback: float = 1e6
     reassignment_penalty: float = 10.0
-    penalty_mode: str = "per_item"     # or "per_volume"
-    per_volume_scale: float = 10.0     # used only if penalty_mode == "per_volume"
+    penalty_mode: str = "per_item"     # or "per_usage"
+    per_usage_scale: float = 10.0     # used only if penalty_mode == "per_usage"
 
 @dataclass
 class StochasticConfig:
@@ -130,7 +126,7 @@ class DLAConfig:
     """
     epsilon: float = 0.1
     log_prices: bool = False
-    output_dir: str = "binpacking/results/dla"
+    output_dir: str = "generic/results/dla"
     min_phase_len: int = 1
     use_offline_slack: bool = True
 
@@ -138,8 +134,13 @@ class DLAConfig:
 class SimDualConfig:
     """
     Controls SAA settings for SimDual pricing.
+    - saa_samples: number of samples used for SAA (>=1)
+    - sample_online_caps: if True, sample online A_t^{cap} (and feasibility) for SAA
+    - sample_online_costs: if True, sample online costs for SAA (else use realized c_t)
     """
     saa_samples: int = 1
+    sample_online_caps: bool = True
+    sample_online_costs: bool = False
 
 @dataclass
 class PrimalDualConfig:
@@ -177,7 +178,7 @@ class SolverConfig:
 @dataclass
 class HeuristicConfig:
     """
-    Scalarization choices for vector bin packing.
+    Scalarization choices for vector-capacity ordering.
     - size_key: "max" | "l1" | "l2" for item ordering (FFD/BFD).
     - residual_scalarization: "max" | "l1" | "l2" for residual scoring.
     """
@@ -195,8 +196,8 @@ class EvalConfig:
 @dataclass
 class Config:
     problem: ProblemConfig
-    volumes: VolumeGenerationConfig
-    graphs: GraphGenerationConfig
+    cap_coeffs: CapCoeffGenerationConfig
+    feasibility: FeasibilityGenerationConfig
     costs: CostConfig
     stoch: StochasticConfig
     slack: SlackConfig
@@ -215,8 +216,8 @@ def load_config_data(data: dict) -> Config:
     """
     return Config(
         problem=ProblemConfig(**data["problem"]),
-        volumes=VolumeGenerationConfig(**data["volumes"]),
-        graphs=GraphGenerationConfig(**data["graphs"]),
+        cap_coeffs=CapCoeffGenerationConfig(**data["cap_coeffs"]),
+        feasibility=FeasibilityGenerationConfig(**data["feasibility"]),
         costs=CostConfig(**data["costs"]),
         stoch=StochasticConfig(**data["stoch"]),
         slack=SlackConfig(**data["slack"]),

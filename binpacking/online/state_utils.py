@@ -6,8 +6,9 @@ from typing import Dict, Optional, List, Callable
 import numpy as np
 
 from generic.config import Config
-from generic.general_utils import effective_capacity, vector_fits, volume_total
+from generic.general_utils import effective_capacity, vector_fits, usage_total
 from generic.models import AssignmentState, Instance, OnlineItem, Decision
+from binpacking.block_utils import block_dim, extract_volume, split_capacities
 
 TOLERANCE = 1e-9
 
@@ -30,8 +31,13 @@ class PlacementContext:
 
 def build_context(cfg: Config, instance: Instance, state: AssignmentState) -> PlacementContext:
     """Create a placement context snapshot from the live state."""
-    loads = state.load.copy()
-    assignments = dict(state.assigned_bin)
+    n = instance.n
+    d = block_dim(n, instance.m)
+    load_vec = np.asarray(state.load, dtype=float).reshape(-1)
+    if load_vec.shape[0] != n * d:
+        raise ValueError("State load does not match expected block structure.")
+    loads = load_vec.reshape((n, d)).copy()
+    assignments = dict(state.assigned_action)
     use_slack = cfg.slack.enforce_slack and getattr(cfg.slack, "apply_to_online", True)
     effective_caps = np.asarray(effective_capacities(instance, cfg, use_slack=use_slack))
     offline_vols = offline_volumes(instance)
@@ -51,7 +57,9 @@ DestinationFn = Callable[[int, int, PlacementContext], Optional[int]]
 
 def offline_volumes(instance: Instance) -> Dict[int, np.ndarray]:
     """Map offline item_id -> volume vector."""
-    return {item.id: item.volume for item in instance.offline_items}
+    n = instance.n
+    m = instance.m
+    return {item.id: extract_volume(item.cap_matrix, n, m) for item in instance.offline_items}
 
 
 def effective_capacities(
@@ -66,16 +74,15 @@ def effective_capacities(
     else:
         enforce_slack = use_slack
     slack_fraction = cfg.slack.fraction if enforce_slack else 0.0
-    return [
-        effective_capacity(bin_spec.capacity, enforce_slack, slack_fraction)
-        for bin_spec in instance.bins
-    ]
+    return list(
+        effective_capacity(split_capacities(instance.b, instance.n), enforce_slack, slack_fraction)
+    )
 
 
-def eviction_penalty(volume: np.ndarray, cfg: Config) -> float:
-    """Penalty incurred when evicting an offline item of given volume."""
-    if cfg.costs.penalty_mode == "per_volume":
-        return cfg.costs.per_volume_scale * volume_total(volume)
+def eviction_penalty(usage: np.ndarray, cfg: Config) -> float:
+    """Penalty incurred when evicting an offline item of given usage."""
+    if cfg.costs.penalty_mode == "per_usage":
+        return cfg.costs.per_usage_scale * usage_total(usage)
     return cfg.costs.reassignment_penalty
 
 
@@ -102,8 +109,8 @@ def execute_placement(
     assignments = dict(base_assignments)
     instance = ctx.instance
     cfg = ctx.cfg
-    fallback_idx = instance.fallback_bin_index
-    regular_bins = len(instance.bins)
+    fallback_idx = instance.fallback_action_index
+    regular_bins = instance.n
     # Mutable context so destination_fn sees up-to-date loads during evictions.
     ctx_mut = PlacementContext(
         cfg=ctx.cfg,
@@ -120,11 +127,11 @@ def execute_placement(
 
     def _current_load(bin_id: int) -> np.ndarray:
         if fallback_idx >= 0 and bin_id == fallback_idx:
-            return loads[fallback_idx]
+            return np.zeros_like(loads[0])
         return loads[bin_id]
 
     capacity = ctx.effective_caps[target_bin]
-    required_volume = item.volume
+    required_volume = extract_volume(item.cap_matrix, instance.n, instance.m)
 
     if vector_fits(_current_load(target_bin), required_volume, capacity, TOLERANCE):
         # No eviction needed, simply reserve the space and pay assignment cost.
@@ -174,9 +181,7 @@ def execute_placement(
             if not vector_fits(loads[dest_bin], volume, dest_cap, TOLERANCE):
                 continue
         loads[target_bin] -= volume
-        if dest_bin == fallback_idx and fallback_idx >= 0:
-            loads[fallback_idx] += volume
-        else:
+        if dest_bin != fallback_idx:
             loads[dest_bin] += volume
         assignments[offline_id] = dest_bin
 

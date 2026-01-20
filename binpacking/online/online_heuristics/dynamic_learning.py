@@ -39,6 +39,7 @@ from binpacking.online.state_utils import (
     offline_volumes,
     TOLERANCE,
 )
+from binpacking.block_utils import block_dim, extract_volume, split_capacities
 
 
 class DynamicLearningPolicy(BaseOnlinePolicy):
@@ -60,7 +61,7 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         self._milp_solver = OfflineMILPSolver(cfg)
 
    
-    def select_bin(
+    def select_action(
         self,
         item: OnlineItem,
         state: AssignmentState,
@@ -84,7 +85,12 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
             self._mark_processed(item)
             return milp_decision
 
-        # Allow evictions if no feasible bin remained (except if disabled in config)
+        if not self.cfg.problem.allow_reassignment:
+            raise PolicyInfeasibleError(
+                f"DynamicLearningPolicy could not place item {item.id}"
+            )
+
+        # Allow evictions if no feasible bin remained 
         best_decision: Optional[Decision] = None
         best_score = float("inf")
         for bin_id in candidate_bins:
@@ -160,32 +166,36 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         """
         Solve fractional LP on observed items to get dual prices for capacities.
         """
-        m = gp.Model("dla_fractional_pricing")
-        m.Params.OutputFlag = 1 if self.cfg.dla.log_prices else 0
+        model = gp.Model("dla_fractional_pricing")
+        model.Params.OutputFlag = 1 if self.cfg.dla.log_prices else 0
 
         observed: Sequence[OnlineItem] = self._seen_items[:t_k]
-        online_volumes = {item.id: item.volume for item in observed}
-        N = len(instance.bins)
-        dims = instance.bins[0].capacity.shape[0] if instance.bins else 1
+        n = instance.n
+        m = instance.m
+        d = block_dim(n, m)
+        online_volumes = {
+            item.id: extract_volume(item.cap_matrix, n, m) for item in observed
+        }
 
         # Capacity scaling per phase, optionally respecting offline slack.
         caps_scaled: List[np.ndarray] = []
         use_slack = self.cfg.dla.use_offline_slack and self.cfg.slack.enforce_slack
         slack_fraction = self.cfg.slack.fraction if use_slack else 0.0
-        offline_load = np.zeros((N, dims), dtype=float)
+        offline_load = np.zeros((n, d), dtype=float)
         off_vols = offline_volumes(instance)
-        fallback_idx = instance.fallback_bin_index
+        fallback_idx = instance.fallback_action_index
         # Count fixed offline load currently occupying regular bins.
-        for item_id, bin_id in state.assigned_bin.items():
+        for item_id, bin_id in state.assigned_action.items():
             if item_id >= len(instance.offline_items):
                 continue
-            if bin_id < 0 or bin_id >= N or bin_id == fallback_idx:
+            if bin_id < 0 or bin_id >= n or bin_id == fallback_idx:
                 continue
-            offline_load[bin_id] += off_vols.get(item_id, np.zeros(dims))
+            offline_load[bin_id] += off_vols.get(item_id, np.zeros(d))
 
         horizon = float(len(instance.online_items))
-        for idx, bin_spec in enumerate(instance.bins):
-            phys = bin_spec.capacity
+        caps = split_capacities(instance.b, n)
+        for idx in range(n):
+            phys = caps[idx]
             eff_total = effective_capacity(phys, use_slack, slack_fraction)
             base_residual = np.maximum(0.0, eff_total - offline_load[idx])
             scaled = (1.0 - h_k) * (t_k / horizon) * base_residual
@@ -198,44 +208,50 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         x = {}
         y_fallback = {}
         for item in observed:
-            for i in item.feasible_bins:
-                x[(item.id, i)] = m.addVar(lb=0.0, ub=1.0, name=f"x_{item.id}_{i}")
+            for i in item.feasible_actions:
+                x[(item.id, i)] = model.addVar(
+                    lb=0.0, ub=1.0, name=f"x_{item.id}_{i}"
+                )
             if allow_fallback:
-                y_fallback[item.id] = m.addVar(lb=0.0, ub=1.0, name=f"y_fallback_{item.id}")
-        m.update()
+                y_fallback[item.id] = model.addVar(
+                    lb=0.0, ub=1.0, name=f"y_fallback_{item.id}"
+                )
+        model.update()
 
         cap_constr: Dict[tuple[int, int], gp.Constr] = {}
-        for i in range(N):
-            for d in range(dims):
+        for i in range(n):
+            for d_idx in range(d):
                 expr = gp.quicksum(
-                    online_volumes[j][d] * var
+                    online_volumes[j][d_idx] * var
                     for (j, ii), var in x.items()
                     if ii == i
                 )
-                cap_constr[(i, d)] = m.addConstr(expr <= float(residual[i][d]), name=f"cap_{i}_{d}")
+                cap_constr[(i, d_idx)] = model.addConstr(
+                    expr <= float(residual[i][d_idx]), name=f"cap_{i}_{d_idx}"
+                )
 
         for item in observed:
             item_vars = [var for (j, i), var in x.items() if j == item.id]
             expr = gp.quicksum(item_vars)
             if allow_fallback:
                 expr += y_fallback[item.id]
-            m.addConstr(expr == 1.0, name=f"assign_{item.id}")
+            model.addConstr(expr == 1.0, name=f"assign_{item.id}")
 
         obj = gp.quicksum(instance.costs.assignment_costs[j, i] * var for (j, i), var in x.items())
         if allow_fallback:
             fallback_cost = self.cfg.costs.huge_fallback
             obj += gp.quicksum(fallback_cost * y for y in y_fallback.values())
-        m.setObjective(obj, GRB.MINIMIZE)
+        model.setObjective(obj, GRB.MINIMIZE)
 
-        m.optimize()
-        if m.Status != GRB.OPTIMAL:
-            raise RuntimeError(f"DLA pricing LP not optimal, status={m.Status}")
+        model.optimize()
+        if model.Status != GRB.OPTIMAL:
+            raise RuntimeError(f"DLA pricing LP not optimal, status={model.Status}")
 
         prices: Dict[int, np.ndarray] = {}
-        for i in range(N):
-            lam = np.zeros(dims, dtype=float)
-            for d in range(dims):
-                lam[d] = abs(float(cap_constr[(i, d)].Pi))
+        for i in range(n):
+            lam = np.zeros(d, dtype=float)
+            for d_idx in range(d):
+                lam[d_idx] = abs(float(cap_constr[(i, d_idx)].Pi))
             prices[i] = lam
         return prices
 
@@ -275,10 +291,10 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         instance: Instance,
         feasible_row: Optional[np.ndarray],
     ) -> Optional[Decision]:
-        regular_bins = len(instance.bins)
+        regular_bins = instance.n
         if regular_bins <= 0:
             return None
-        fallback_idx = instance.fallback_bin_index
+        fallback_idx = instance.fallback_action_index
         cols = regular_bins + (1 if fallback_idx >= 0 else 0)
         try:
             feasible_full = current_feasible_row(
@@ -300,27 +316,26 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
             [[self._score(bin_id, item, instance) for bin_id in range(regular_bins)]],
             dtype=float,
         )
-        volume = np.asarray(item.volume, dtype=float).reshape(1, -1)
-        capacities, _fallback_capacity = remaining_capacities(self.cfg, state, instance)
+        cap_matrix = np.asarray(item.cap_matrix, dtype=float)
+        capacities = remaining_capacities(self.cfg, state, instance)
         data = build_offline_milp_data_from_arrays(
-            volumes=volume,
+            cap_matrices=cap_matrix.reshape(1, *cap_matrix.shape),
             costs=costs,
             feasible=feasible.reshape(1, -1),
-            capacities=capacities,
+            b=capacities,
             fallback_idx=-1,
-            fallback_capacity=0.0,
             slack_enforce=False,
             slack_fraction=0.0,
         )
         rh_state, rh_info = self._milp_solver.solve_from_data(data)
         if not rh_info.feasible:
             return None
-        assigned_bin = rh_state.assigned_bin.get(0)
-        if assigned_bin is None:
+        assigned_action = rh_state.assigned_action.get(0)
+        if assigned_action is None:
             return None
-        incremental_cost = lookup_assignment_cost(self.cfg, instance, item.id, assigned_bin)
+        incremental_cost = lookup_assignment_cost(self.cfg, instance, item.id, assigned_action)
         return Decision(
-            placed_item=(item.id, int(assigned_bin)),
+            placed_item=(item.id, int(assigned_action)),
             evicted_offline=[],
             reassignments=[],
             incremental_cost=incremental_cost,
@@ -332,8 +347,8 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         instance: Instance,
         feasible_row: Optional[np.ndarray],
     ) -> List[int]:
-        regular_bins = len(instance.bins)
-        fallback_idx = instance.fallback_bin_index
+        regular_bins = instance.n
+        fallback_idx = instance.fallback_action_index
         cols = regular_bins + (1 if fallback_idx >= 0 else 0)
         try:
             feasible = current_feasible_row(
@@ -351,11 +366,12 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
 
     def _score(self, bin_id: int, item: OnlineItem, instance: Instance) -> float:
         c_ji = lookup_assignment_cost(self.cfg, instance, item.id, bin_id)
-        lam_i = self._current_prices.get(bin_id, np.zeros_like(item.volume))
+        volume = extract_volume(item.cap_matrix, instance.n, instance.m)
+        lam_i = self._current_prices.get(bin_id, np.zeros_like(volume))
         if self.cfg.util_pricing.vector_prices:
-            return c_ji + float(np.dot(lam_i, item.volume))
+            return c_ji + float(np.dot(lam_i, volume))
         lam_scalar = scalarize_vector(lam_i, "max")
-        return c_ji + lam_scalar * scalarize_vector(item.volume, self.cfg.heuristics.size_key)
+        return c_ji + lam_scalar * scalarize_vector(volume, self.cfg.heuristics.size_key)
 
     def _eviction_order_desc(
         self,
@@ -385,8 +401,8 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         volume = ctx.offline_volumes.get(offline_id, zero_vec)
         instance = ctx.instance
         feasible_row = instance.offline_feasible.feasible[offline_id]
-        regular_bins = len(instance.bins)
-        fallback_idx = instance.fallback_bin_index
+        regular_bins = instance.n
+        fallback_idx = instance.fallback_action_index
 
         best_candidate: Optional[int] = None
         best_cost = float("inf")
