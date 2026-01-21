@@ -14,7 +14,7 @@ from generic.experiments.pipeline_registry import default_registry
 from generic.experiments.run_eval import run_eval
 
 
-PIPELINES = ("util+sim_base", "util+cost_best_fit")
+PIPELINES = ("util+sim_dual", "util+cost_best_fit")
 OFFLINE_RATIO = 0.8
 TOTAL_HORIZON = 300
 
@@ -94,12 +94,12 @@ def _apply_pricing_params(cfg, params: Dict[str, Any]) -> None:
         cfg.util_pricing.exp_rate = float(params["exp_rate"])
 
 
-def _is_valid_summary(summary: Dict[str, Any]) -> bool:
+def _is_valid_summary(summary: Dict[str, Any], max_online_failures: int) -> bool:
     agg = summary.get("aggregate", {})
     return (
         summary.get("total_objective_mean") is not None
         and int(agg.get("offline_failures", 0)) == 0
-        and int(agg.get("online_failures", 0)) == 0
+        and int(agg.get("online_failures", 0)) <= max_online_failures
     )
 
 
@@ -146,6 +146,12 @@ def main() -> None:
         default=TOTAL_HORIZON,
         help="Total horizon (M_off + M_onl).",
     )
+    parser.add_argument(
+        "--max-online-failures",
+        type=int,
+        default=10,
+        help="Allow up to this many online failures per pipeline.",
+    )
     args = parser.parse_args()
 
     base_cfg = load_config(args.base_config)
@@ -170,6 +176,8 @@ def main() -> None:
     for params in _iter_param_grid():
         objective_values: List[float] = []
         valid_count = 0
+        online_failures: List[int] = []
+        offline_failures: List[int] = []
         for pipeline_name, spec in pipelines.items():
             cfg = copy.deepcopy(base_cfg)
             _apply_pricing_params(cfg, params)
@@ -186,6 +194,9 @@ def main() -> None:
                 offline_solver_name=spec.offline_solver,
                 online_policy_name=spec.online_policy,
             )
+            agg = summary.get("aggregate", {})
+            offline_failure_count = agg.get("offline_failures")
+            online_failure_count = agg.get("online_failures")
 
             row = {
                 "pipeline": pipeline_name,
@@ -198,19 +209,27 @@ def main() -> None:
                 "m_onl": m_onl,
                 "seed_count": summary.get("seed_count"),
                 "total_objective_mean": summary.get("total_objective_mean"),
-                "offline_failures": summary.get("aggregate", {}).get("offline_failures"),
-                "online_failures": summary.get("aggregate", {}).get("online_failures"),
-                "valid": _is_valid_summary(summary),
+                "offline_failures": offline_failure_count,
+                "online_failures": online_failure_count,
+                "valid": _is_valid_summary(summary, args.max_online_failures),
             }
             results.append(row)
             if row["valid"] and row["total_objective_mean"] is not None:
                 objective_values.append(float(row["total_objective_mean"]))
                 valid_count += 1
+            if offline_failure_count is not None:
+                offline_failures.append(int(offline_failure_count))
+            if online_failure_count is not None:
+                online_failures.append(int(online_failure_count))
 
         combo_valid = valid_count == len(pipelines)
         combo_mean = None
         if combo_valid and objective_values:
             combo_mean = sum(objective_values) / len(objective_values)
+        online_failures_total = sum(online_failures) if online_failures else None
+        online_failures_max = max(online_failures) if online_failures else None
+        offline_failures_total = sum(offline_failures) if offline_failures else None
+        offline_failures_max = max(offline_failures) if offline_failures else None
         combo_results.append(
             {
                 "update_rule": params["update_rule"],
@@ -222,6 +241,10 @@ def main() -> None:
                 "m_onl": m_onl,
                 "pipeline_count": len(pipelines),
                 "valid_pipeline_count": valid_count,
+                "online_failures_total": online_failures_total,
+                "online_failures_max": online_failures_max,
+                "offline_failures_total": offline_failures_total,
+                "offline_failures_max": offline_failures_max,
                 "total_objective_mean": combo_mean,
                 "valid": combo_valid,
             }
@@ -242,6 +265,7 @@ def main() -> None:
                 "offline_ratio": args.offline_ratio,
                 "total_horizon": args.total_horizon,
                 "m_onl": m_onl,
+                "max_online_failures": args.max_online_failures,
                 "pipelines": list(pipelines),
                 "results": results,
                 "combo_results": combo_results,

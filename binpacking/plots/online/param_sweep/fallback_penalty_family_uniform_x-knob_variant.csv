@@ -1,9 +1,0 @@
-family_base,knob_variant,ratio_variant,pipeline,runs_total_x,infeasible_runs_x,feasible_runs_x,fallback_mean,fallback_sem,infeasible_rate_x,runs_total_y,infeasible_runs_y,feasible_runs_y,penalty_mean,penalty_sem,infeasible_rate_y,_x
-uniform,beta11_same_load,off50_on50,CABFD+CostAwareBestFit,50,0,50,0.0,0.0,0.0,50,0,50,0.0,0.0,0.0,beta11_same_load
-uniform,beta11_same_load,off50_on50,CABFD+PrimalDual,50,0,50,0.0,0.0,0.0,50,0,50,0.0,0.0,0.0,beta11_same_load
-uniform,beta11_same_load,off50_on50,MILP(offSlack)+CostAwareBestFit,50,0,50,0.0,0.0,0.0,50,0,50,0.0,0.0,0.0,beta11_same_load
-uniform,beta11_same_load,off50_on50,MILP(offSlack)+PrimalDual,50,0,50,0.0,0.0,0.0,50,0,50,0.0,0.0,0.0,beta11_same_load
-uniform,beta11_same_load,off50_on50,MILP+CostAwareBestFit,50,0,50,0.0,0.0,0.0,50,0,50,0.0,0.0,0.0,beta11_same_load
-uniform,beta11_same_load,off50_on50,MILP+PrimalDual,50,0,50,0.0,0.0,0.0,50,0,50,0.0,0.0,0.0,beta11_same_load
-uniform,beta11_same_load,off50_on50,UtilizationPriced+CostAwareBestFit,50,0,50,0.0,0.0,0.0,50,0,50,0.0,0.0,0.0,beta11_same_load
-uniform,beta11_same_load,off50_on50,UtilizationPriced+PrimalDual,50,0,50,0.0,0.0,0.0,50,0,50,0.0,0.0,0.0,beta11_same_load

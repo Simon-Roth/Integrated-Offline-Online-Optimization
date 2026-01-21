@@ -179,7 +179,7 @@ def run_eval(
             price_seed = seed + 10000
             price_samples = 1
             sample_online_caps = True
-            sample_online_costs = True
+            sample_online_costs = False
             if policy_path == ONLINE_SIM_DUAL:
                 price_samples = max(1, int(cfg.sim_dual.saa_samples))
                 sample_online_caps = bool(cfg.sim_dual.sample_online_caps)
