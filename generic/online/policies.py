@@ -9,6 +9,7 @@ import numpy as np
 from generic.config import Config
 from generic.data.instance_generators import (
     _ensure_row_feasible,
+    _build_feas_constraints,
     _build_block_cap_matrix,
     _normalize_beta_params,
     _normalize_bounds,
@@ -20,7 +21,6 @@ from generic.general_utils import effective_capacity, make_rng
 from generic.models import AssignmentState, Instance, OnlineItem, Decision
 from generic.online.policy_utils import (
     current_cost_row,
-    current_feasible_row,
     lookup_assignment_cost,
     PolicyInfeasibleError,
     remaining_capacities,
@@ -37,7 +37,6 @@ class BaseOnlinePolicy(Protocol):
         item: OnlineItem,
         state: AssignmentState,
         instance: Instance,
-        feasible_row: Optional[np.ndarray],
     ) -> Decision:
         """
         Decide how to place 'item' given the current assignment state.
@@ -50,8 +49,6 @@ class BaseOnlinePolicy(Protocol):
             Current assignment state (will be mutated by the solver after the decision).
         instance:
             The full problem instance (offline + online data).
-        feasible_row:
-            Row of the feasibility matrix for this item, if available (length n or n+1).
 
         Returns
         -------
@@ -100,6 +97,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         self._effective_caps: Optional[np.ndarray] = None
         self._cost_scale: float = 1.0
         self._eta_scale: float = 1.0
+        self._total_steps: int = 0
         self._t: int = 0
 
     def select_action(
@@ -107,7 +105,6 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         item: OnlineItem,
         state: AssignmentState,
         instance: Instance,
-        feasible_row: Optional[np.ndarray],
     ) -> Decision:
         # Step 1-2: initialize duals and remaining capacities once per instance.
         self._reset_if_needed(instance, state)
@@ -120,14 +117,8 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         fallback_idx = instance.fallback_action_index
         cols = n + (1 if fallback_idx >= 0 else 0)
         cap_matrix = np.asarray(item.cap_matrix, dtype=float)
-        feasible = current_feasible_row(
-            self.cfg,
-            item,
-            feasible_row,
-            n,
-            cols,
-            fallback_idx,
-        )
+        feas_matrix = np.asarray(item.feas_matrix, dtype=float)
+        feas_rhs = np.asarray(item.feas_rhs, dtype=float)
         costs = current_cost_row(self.cfg, instance, item.id, cols).reshape(1, -1)
 
         # Step 4: solve the price-aware MILP for this single arrival.
@@ -141,13 +132,14 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         assigned_action = self._solve_price_aware_milp(
             cap_matrix,
             costs,
-            feasible,
+            feas_matrix,
+            feas_rhs,
             capacities,
             fallback_idx,
         )
 
         # Step 5-7: apply x_t (the OnlineSolver updates state/load), then update lambda.
-        self._update_duals(assigned_action, cap_matrix, n)
+        self._update_duals(assigned_action, cap_matrix, n, capacities)
 
         incremental_cost = lookup_assignment_cost(self.cfg, instance, item.id, assigned_action)
         return Decision(
@@ -172,6 +164,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         T = max(1, len(instance.online_items))
         self._effective_caps = caps_eff
         self._cap_per_step = caps_eff / float(T)
+        self._total_steps = T
         self._cost_scale = self._compute_cost_scale(instance, instance.n)
         self._eta_scale = 1.0 / self._cost_scale if self.cfg.primal_dual.normalize_costs else 1.0
         self._t = 0
@@ -205,14 +198,16 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         self,
         cap_matrix: np.ndarray,
         costs: np.ndarray,
-        feasible: np.ndarray,
+        feas_matrix: np.ndarray,
+        feas_rhs: np.ndarray,
         capacities: np.ndarray,
         fallback_idx: int,
     ) -> int:
         data = build_offline_milp_data_from_arrays(
             cap_matrices=cap_matrix.reshape(1, *cap_matrix.shape),
             costs=costs,
-            feasible=feasible,
+            feas_matrices=[feas_matrix],
+            feas_rhs=[feas_rhs],
             b=capacities,
             fallback_idx=fallback_idx,
             slack_enforce=False,
@@ -227,16 +222,26 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         return int(assigned_action)
 
     # Update dual prices after choosing x_t.
-    def _update_duals(self, assigned_action: int, cap_matrix: np.ndarray, n: int) -> None:
+    def _update_duals(
+        self,
+        assigned_action: int,
+        cap_matrix: np.ndarray,
+        n: int,
+        remaining_caps: np.ndarray,
+    ) -> None:
         eta_t = self._eta_t() * self._eta_scale
         usage = np.zeros_like(self._lambda)
         if 0 <= assigned_action < n:
             usage = cap_matrix[:, assigned_action]
+        target = self._cap_per_step
+        if self.cfg.primal_dual.use_remaining_capacity_target:
+            steps_left = max(1, self._total_steps - self._t)
+            target = remaining_caps.reshape(-1) / float(steps_left)
         if self.cfg.primal_dual.normalize_update:
-            denom = np.where(self._cap_per_step > 0.0, self._cap_per_step, 1.0)
-            delta = (usage - self._cap_per_step) / denom
+            denom = np.where(target > 0.0, target, 1.0)
+            delta = (usage - target) / denom
         else:
-            delta = usage - self._cap_per_step
+            delta = usage - target
         self._lambda = np.maximum(self._lambda + eta_t * delta, 0.0)
         self._t += 1
 
@@ -311,21 +316,14 @@ class SimDualPolicy(BaseOnlinePolicy):
         item: OnlineItem,
         state: AssignmentState,
         instance: Instance,
-        feasible_row: Optional[np.ndarray],
     ) -> Decision:
         # Step 1: observe A_t^{cap}, feasibility, and c_t (assignment costs)
         n = instance.n
         fallback_idx = instance.fallback_action_index
         cols = n + (1 if fallback_idx >= 0 else 0)
         cap_matrix = np.asarray(item.cap_matrix, dtype=float)
-        feasible = current_feasible_row(
-            self.cfg,
-            item,
-            feasible_row,
-            n,
-            cols,
-            fallback_idx,
-        )
+        feas_matrix = np.asarray(item.feas_matrix, dtype=float)
+        feas_rhs = np.asarray(item.feas_rhs, dtype=float)
         costs = current_cost_row(self.cfg, instance, item.id, cols).reshape(1, -1)
 
         # Step 2: add fixed dual prices to the objective and solve the one-step MILP.
@@ -334,7 +332,8 @@ class SimDualPolicy(BaseOnlinePolicy):
         assigned_action = self._solve_price_aware_milp(
             cap_matrix,
             costs,
-            feasible,
+            feas_matrix,
+            feas_rhs,
             capacities,
             fallback_idx,
         )
@@ -387,14 +386,16 @@ class SimDualPolicy(BaseOnlinePolicy):
         self,
         cap_matrix: np.ndarray,
         costs: np.ndarray,
-        feasible: np.ndarray,
+        feas_matrix: np.ndarray,
+        feas_rhs: np.ndarray,
         capacities: np.ndarray,
         fallback_idx: int,
     ) -> int:
         data = build_offline_milp_data_from_arrays(
             cap_matrices=cap_matrix.reshape(1, *cap_matrix.shape),
             costs=costs,
-            feasible=feasible,
+            feas_matrices=[feas_matrix],
+            feas_rhs=[feas_rhs],
             b=capacities,
             fallback_idx=fallback_idx,
             slack_enforce=False,
@@ -441,7 +442,6 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
         item: OnlineItem,
         state: AssignmentState,
         instance: Instance,
-        feasible_row: Optional[np.ndarray],
     ) -> Decision:
         # Step 1: observe A_t and remaining capacity (from state).
         idx = self._online_index(item, instance)
@@ -454,9 +454,8 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
         # Step 2: sample future A_tau for tau > t and build the remaining MILP.
         cap_matrices = self._build_cap_matrices(item, instance, remaining)
         costs = self._build_costs(instance, item.id, remaining, n, cols, online_index=idx)
-        feasible = self._build_feasible(
+        feas_matrices, feas_rhs = self._build_feasible(
             item,
-            feasible_row,
             remaining,
             n,
             cols,
@@ -468,7 +467,8 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
         data = build_offline_milp_data_from_arrays(
             cap_matrices=cap_matrices,
             costs=costs,
-            feasible=feasible,
+            feas_matrices=feas_matrices,
+            feas_rhs=feas_rhs,
             b=capacities,
             fallback_idx=fallback_idx,
             slack_enforce=False,
@@ -541,28 +541,26 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
     def _build_feasible(
         self,
         item: OnlineItem,
-        feasible_row: Optional[np.ndarray],
         remaining: int,
         n: int,
         cols: int,
         fallback_idx: int,
-    ) -> np.ndarray:
-        current = current_feasible_row(
-            self.cfg,
-            item,
-            feasible_row,
-            n,
-            cols,
-            fallback_idx,
-        )
+    ) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        current_mats = [np.asarray(item.feas_matrix, dtype=float)]
+        current_rhs = [np.asarray(item.feas_rhs, dtype=float)]
         if remaining <= 0:
-            return current
+            return current_mats, current_rhs
         base_mask = (self._rng.uniform(size=(remaining, n)) < self.cfg.feasibility.p_onl).astype(int)
         _ensure_row_feasible(base_mask, self._rng)
-        if cols > n:
-            fallback_val = 1 if self.cfg.problem.fallback_allowed_online else 0
-            fallback_col = np.full((remaining, 1), fallback_val, dtype=int)
-            future = np.hstack([base_mask, fallback_col])
-        else:
-            future = base_mask
-        return np.vstack([current, future])
+        future_mats: list[np.ndarray] = []
+        future_rhs: list[np.ndarray] = []
+        for idx in range(remaining):
+            feas_matrix, feas_rhs = _build_feas_constraints(
+                base_mask[idx],
+                fallback_allowed=self.cfg.problem.fallback_allowed_online,
+                fallback_idx=fallback_idx,
+                cols=cols,
+            )
+            future_mats.append(feas_matrix)
+            future_rhs.append(feas_rhs)
+        return current_mats + future_mats, current_rhs + future_rhs

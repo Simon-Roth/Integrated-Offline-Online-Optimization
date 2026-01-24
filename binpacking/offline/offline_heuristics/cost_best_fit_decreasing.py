@@ -5,7 +5,13 @@ from typing import Dict, Tuple, List
 
 import numpy as np
 
-from generic.general_utils import effective_capacity, scalarize_vector, vector_fits, residual_vector
+from generic.general_utils import (
+    action_is_feasible,
+    effective_capacity,
+    scalarize_vector,
+    vector_fits,
+    residual_vector,
+)
 from generic.models import AssignmentState, Instance
 from generic.offline.offline_policies import BaseOfflinePolicy
 from generic.offline.models import OfflineSolutionInfo
@@ -52,7 +58,11 @@ class CostAwareBestFitDecreasing(BaseOfflinePolicy):
             best_residual = float("inf")
 
             for bin_idx in range(regular_actions):
-                if inst.offline_feasible.feasible[item_idx, bin_idx] != 1:
+                if not action_is_feasible(
+                    inst.offline_items[item_idx].feas_matrix,
+                    inst.offline_items[item_idx].feas_rhs,
+                    bin_idx,
+                ):
                     continue
                 if not vector_fits(loads[bin_idx], volume, eff_caps[bin_idx], 1e-9):
                     continue
@@ -73,9 +83,12 @@ class CostAwareBestFitDecreasing(BaseOfflinePolicy):
                 continue
 
             if (
-                self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
-                and fallback_idx >= 0
-                and inst.offline_feasible.feasible[item_idx, fallback_idx] == 1
+                fallback_idx >= 0
+                and action_is_feasible(
+                    inst.offline_items[item_idx].feas_matrix,
+                    inst.offline_items[item_idx].feas_rhs,
+                    fallback_idx,
+                )
             ):
                 assigned_action[item_idx] = fallback_idx
                 continue

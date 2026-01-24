@@ -98,15 +98,14 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
                     lam = float(price_cache[action_idx])
                     costs[0, action_idx] += lam * scalarize_vector(norm_volume, size_key)
 
-            feasible_row = np.asarray(
-                inst.offline_feasible.feasible[item_idx, :cols],
-                dtype=int,
-            ).reshape(1, -1)
+            feas_matrix = np.asarray(inst.offline_items[item_idx].feas_matrix, dtype=float)
+            feas_rhs = np.asarray(inst.offline_items[item_idx].feas_rhs, dtype=float)
             cap_matrix = inst.offline_items[item_idx].cap_matrix
             data = build_offline_milp_data_from_arrays(
                 cap_matrices=cap_matrix.reshape(1, *cap_matrix.shape),
                 costs=costs,
-                feasible=feasible_row,
+                feas_matrices=[feas_matrix],
+                feas_rhs=[feas_rhs],
                 b=remaining.reshape(-1),
                 fallback_idx=fallback_idx,
                 slack_enforce=False,

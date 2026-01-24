@@ -1,7 +1,7 @@
 # generic/models.py
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 import numpy as np
 
 ActionId = int
@@ -13,9 +13,13 @@ class ItemSpec:
     Item specification.
     - id: unique integer id (offline: 0..M_off-1; online arrivals start at M_off)
     - cap_matrix: A_t^{cap} for this item (shape m x n)
+    - feas_matrix: A_t^{feas} for this item (shape p_t x n')
+    - feas_rhs: b_t for this item (shape p_t,)
     """
     id: ItemId
     cap_matrix: np.ndarray
+    feas_matrix: np.ndarray
+    feas_rhs: np.ndarray
 
 @dataclass
 class Costs:
@@ -34,15 +38,6 @@ class Costs:
     huge_fallback: float = 1e6
 
 @dataclass
-class FeasibleGraph:
-    """
-    Feasibility mask for item-action edges.
-    - feasible[j, i] = 1 if action i is allowed for item j; 0 otherwise.
-      For ONLINE items, the fallback column is controlled by the online fallback flag.
-    """
-    feasible: np.ndarray  # shape (M_phase, n) or (M_phase, n+1)
-
-@dataclass
 class Instance:
     """
     Full offline and optional online instance at t=0.
@@ -51,20 +46,16 @@ class Instance:
     - b: capacity vector b (length m)
     - offline_items: list of ItemSpec (length M_off)
     - costs: Costs
-    - offline_feasible: FeasibleGraph for OFFLINE items (G_off)
     - fallback_action_index: index == n (after regular actions), or -1 if disabled
     - online_items: List of OnlineItem (length M_on)
-    - online_feasible: Optional feasible graph for online items
     """
     n: int
     m: int
     b: np.ndarray
     offline_items: List[ItemSpec]
     costs: Costs
-    offline_feasible: FeasibleGraph
     fallback_action_index: int
-    online_items: List[OnlineItem] = field(default_factory=list) 
-    online_feasible: Optional[FeasibleGraph] = None
+    online_items: List[OnlineItem] = field(default_factory=list)
 
 
 # ---------------------------
@@ -77,11 +68,13 @@ class OnlineItem:
     Online item arrival.
     - id: unique id (>= M_off)
     - cap_matrix: A_t^{cap} for this item (shape m x n)
-    - feasible_actions: regular actions only (no fallback), given at arrival time
+    - feas_matrix: A_t^{feas} for this item (shape p_t x n')
+    - feas_rhs: b_t for this item (shape p_t,)
     """
     id: ItemId
     cap_matrix: np.ndarray
-    feasible_actions: List[ActionId]
+    feas_matrix: np.ndarray
+    feas_rhs: np.ndarray
 
 # ---------------------------
 # Mutable assignment state

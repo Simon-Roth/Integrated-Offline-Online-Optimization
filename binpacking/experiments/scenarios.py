@@ -63,14 +63,10 @@ def mean_scaled_beta(bounds: Tuple[float, float], alpha_beta: Tuple[float, float
 # Canonical scenario knobs
 # -----------------------------
 
-TOTAL_ITEMS = 300   # always keep M_off + M_onl = 300 for interpretability
+TOTAL_ITEMS = 200   
 
 # Keep bounds fixed in most families for clean attribution
 DEFAULT_BOUNDS = (30, 180)
-
-# Choose target mean usage via m=1/3 so that E[coeff]=0.9 on bounds [0.5,1.7]
-# (shown in the "check" section below)
-TARGET_M = 0.3
 
 # Usage variance levels (same mean, different variance)
 VOL_LOW_VAR   = (9.0, 21.0)   # kappa=30 (low variance)
@@ -84,13 +80,13 @@ VOL_UNIFORM_01 = (1.0, 1.0)
 RATIO_SWEEP = [
     ("off0_on100",    0),
     #("off10_on90",   30),
-    ("off20_on80",   60),
+    ("off20_on80",   40),
     #("off30_on70",   90),
-    ("off40_on60",  120),
+    ("off40_on60",  80),
     #("off50_on50",  150),
-    ("off60_on40",  180),
+    ("off60_on40",  120),
     #("off70_on30",  210),
-    ("off80_on20",  240),
+    ("off80_on20",  160),
     #("off90_on10",  270),
     #("off100_on0",  300),
 ]
@@ -139,97 +135,93 @@ for suffix, M_off in RATIO_SWEEP:
                 **ratio_overrides(M_off),
                 **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
                 **base_cost_graph_overrides(),
-                # baseline load regime stays at b_mean=30 (default yaml)
             },
             description="Baseline: bounded coefficients with fixed mean (E[coeff]=0.9) and medium variance; ratio sweep.",
         )
     )
 
-# # ========= FAMILY 2: COEFF VARIANCE (ceteris paribus mean & bounds), fixed ratio (50/50) =========
-# # Baseline is VOL_MID_VAR = Beta(3,7) on DEFAULT_BOUNDS.
-# # We compare:
-# # - lowvar: more concentrated Beta with same mean
-# # - highvar: uniform Beta(1,1) (higher uncertainty) with b_mean adjusted to keep load comparable
-# SCENARIO_SWEEP.append(
-#     ScenarioConfig(
-#         name="vol_midvar_off50_on50",
-#         overrides={
-#             **ratio_overrides(150),
-#             **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
-#             **base_cost_graph_overrides(),
-#         },
-#         description="Coeff dispersion baseline (mid variance): Beta(3,7) on [30,180].",
-#     )
-# )
+# ========= FAMILY 2: COEFF VARIANCE (ceteris paribus mean & bounds), fixed ratio (50/50) =========
+# Baseline is VOL_MID_VAR = Beta(3,7) on DEFAULT_BOUNDS.
+# We compare:
+# - lowvar: more concentrated Beta with same mean
+# - highvar: uniform Beta(1,1) (higher uncertainty) with b_mean adjusted to keep load comparable
+SCENARIO_SWEEP.append(
+    ScenarioConfig(
+        name="vol_midvar_off50_on50",
+        overrides={
+            **ratio_overrides(100),
+            **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
+            **base_cost_graph_overrides(),
+        },
+        description="Coeff dispersion baseline (mid variance): Beta(3,7) on [30,180].",
+    )
+)
 
-# SCENARIO_SWEEP.append(
-#     ScenarioConfig(
-#         name="vol_lowvar_off50_on50",
-#         overrides={
-#             **ratio_overrides(150),
-#             **volume_overrides(VOL_LOW_VAR, DEFAULT_BOUNDS),
-#             **base_cost_graph_overrides(),
-#         },
-#         description="Lower coeff variance than baseline (same mean): e.g., Beta(6,14) on [30,180].",
-#     )
-# )
+SCENARIO_SWEEP.append(
+    ScenarioConfig(
+        name="vol_lowvar_off50_on50",
+        overrides={
+            **ratio_overrides(100),
+            **volume_overrides(VOL_LOW_VAR, DEFAULT_BOUNDS),
+            **base_cost_graph_overrides(),
+        },
+        description="Lower coeff variance than baseline (same mean): e.g., Beta(6,14) on [30,180].",
+    )
+)
 
-# # High-uncertainty control: Uniform Beta(1,1) but keep global load comparable by adjusting b_mean
-# baseline_Ev = mean_scaled_beta(DEFAULT_BOUNDS, VOL_MID_VAR)                 # 75.0
-# uniform_Ev  = mean_scaled_beta(DEFAULT_BOUNDS, VOL_HIGH_VAR_UNIFORM)       # 105.0
-# baseline_cap_mean = 2500.0
-# uniform_cap_mean = baseline_cap_mean * (uniform_Ev / baseline_Ev)          # 3500.0
+# High-uncertainty control: Uniform Beta(1,1) but keep global load comparable by adjusting b_mean
+baseline_Ev = mean_scaled_beta(DEFAULT_BOUNDS, VOL_MID_VAR)                 
+uniform_Ev  = mean_scaled_beta(DEFAULT_BOUNDS, VOL_HIGH_VAR_UNIFORM)       
+baseline_cap_mean = 1680.0
+uniform_cap_mean = baseline_cap_mean * (uniform_Ev / baseline_Ev)          
 
-# SCENARIO_SWEEP.append(
-#     ScenarioConfig(
-#         name="vol_highuncert_uniform_same_load_off50_on50",
-#         overrides={
-#             **ratio_overrides(150),
-#             **volume_overrides(VOL_HIGH_VAR_UNIFORM, DEFAULT_BOUNDS),
-#             **base_cost_graph_overrides(),
-#             "problem": {"b_mean": float(uniform_cap_mean)},
-#         },
-#         description="High-uncertainty control: Uniform coeffs with adjusted b_mean to match baseline load.",
-#     )
-# )
+SCENARIO_SWEEP.append(
+    ScenarioConfig(
+        name="vol_highuncert_uniform_same_load_off50_on50",
+        overrides={
+            **ratio_overrides(100),
+            **volume_overrides(VOL_HIGH_VAR_UNIFORM, DEFAULT_BOUNDS),
+            **base_cost_graph_overrides(),
+            "problem": {"b_mean": float(uniform_cap_mean)},
+        },
+        description="High-uncertainty control: Uniform coeffs with adjusted b_mean to match baseline load.",
+    )
+)
 
 
-# # ========= FAMILY 3: GRAPH SPARSITY (only p_onl changes), fixed ratio (50/50) =========
-# for tag, p_onl in [("dense", 0.8), ("sparse", 0.2)]:
-#     SCENARIO_SWEEP.append(
-#         ScenarioConfig(
-#             name=f"graph_{tag}_off50_on50",
-#             overrides={
-#                 **ratio_overrides(150),
-#                 **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
-#                 **base_cost_graph_overrides(),
-#                 "feasibility": {"p_off": 0.8, "p_onl": p_onl},
-#             },
-#             description="Graph feasibility test (online sparsity) at fixed coeffs/costs/load.",
-#         )
-#     )
+# ========= FAMILY 3: GRAPH SPARSITY (only p_onl changes), fixed ratio (50/50) =========
+for tag, p_onl in [("dense", 0.8), ("sparse", 0.2)]:
+    SCENARIO_SWEEP.append(
+        ScenarioConfig(
+            name=f"graph_{tag}_off50_on50",
+            overrides={
+                **ratio_overrides(100),
+                **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
+                **base_cost_graph_overrides(),
+                "feasibility": {"p_off": 0.8, "p_onl": p_onl},
+            },
+            description="Graph feasibility test (online sparsity) at fixed coeffs/costs/load.",
+        )
+    )
 
-# # ========= FAMILY 4: LOAD REGIME (b_mean changes), fixed ratio (50/50) =========
-# # b_mean values for n=10, M=300, E[coeff]=75:
-# # - baseline rho=0.9  -> 2500
-# # - underload rho~0.8 -> ~2812.5 -> use 2800 (clean)
-# # - overload rho~1.1  -> ~2045.5 -> use 2050 (clean)
-# for tag, cap_mean in [("underload", 2800.0), ("overload", 2050.0)]:
-#     base = ratio_overrides(150)
-#     # Preserve the ratio overrides (M_off + M_onl) while tweaking b_mean.
-#     base["problem"]["b_mean"] = cap_mean
-#     SCENARIO_SWEEP.append(
-#         ScenarioConfig(
-#             name=f"load_{tag}_off50_on50",
-#             overrides={
-#                 **base,
-#                 **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
-#                 **base_cost_graph_overrides(),
-#             },
-#             description="Load regime test by varying b_mean only (coeffs/costs fixed).",
-#         )
+# ========= FAMILY 4: LOAD REGIME (b_mean changes), fixed ratio (50/50) =========
+
+for tag, cap_mean in [("underload", 1880.0), ("overload", 1360.0)]:
+    base = ratio_overrides(100)
+    # Preserve the ratio overrides (M_off + M_onl) while tweaking b_mean.
+    base["problem"]["b_mean"] = cap_mean
+    SCENARIO_SWEEP.append(
+        ScenarioConfig(
+            name=f"load_{tag}_off50_on50",
+            overrides={
+                **base,
+                **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
+                **base_cost_graph_overrides(),
+            },
+            description="Load regime test by varying b_mean only (coeffs/costs fixed).",
+        )
         
-#     )
+    )
 
 
 def select_scenarios(names: Iterable[str] | None) -> List[ScenarioConfig]:

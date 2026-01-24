@@ -27,11 +27,18 @@ import numpy as np
 
 from generic.config import Config
 from generic.data.offline_milp_assembly import build_offline_milp_data_from_arrays
-from generic.general_utils import effective_capacity, scalarize_vector, vector_fits, residual_vector
+from generic.general_utils import (
+    action_is_feasible,
+    feasible_action_indices,
+    effective_capacity,
+    scalarize_vector,
+    vector_fits,
+    residual_vector,
+)
 from generic.models import AssignmentState, Decision, Instance, OnlineItem
 from generic.offline.offline_solver import OfflineMILPSolver
 from generic.online.policies import BaseOnlinePolicy, PolicyInfeasibleError
-from generic.online.policy_utils import current_feasible_row, lookup_assignment_cost, remaining_capacities
+from generic.online.policy_utils import lookup_assignment_cost, remaining_capacities
 from binpacking.online.state_utils import (
     PlacementContext,
     build_context,
@@ -66,7 +73,6 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         item: OnlineItem,
         state: AssignmentState,
         instance: Instance,
-        feasible_row: Optional[np.ndarray],
     ) -> Decision:
         # Lazily build phase schedule on the first call.
         if not self._schedule:
@@ -75,12 +81,12 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         # Update prices if a phase boundary was reached after the last item.
         self._maybe_update_prices(state, instance)
 
-        candidate_bins = self._candidate_bins(item, instance, feasible_row)
+        candidate_bins = self._candidate_bins(item, instance)
         if not candidate_bins:
             raise PolicyInfeasibleError(f"No feasible regular bin for online item {item.id}")
 
         # First, try to place without evictions via a one-item MILP (regular bins only).
-        milp_decision = self._milp_no_eviction(item, state, instance, feasible_row)
+        milp_decision = self._milp_no_eviction(item, state, instance)
         if milp_decision is not None:
             self._mark_processed(item)
             return milp_decision
@@ -204,15 +210,19 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         # Residual after offline load only (online load is modeled by LP vars).
         residual = caps_scaled
 
-        allow_fallback = self.cfg.problem.fallback_is_enabled
         x = {}
         y_fallback = {}
         for item in observed:
-            for i in item.feasible_actions:
+            feasible_bins = feasible_action_indices(
+                item.feas_matrix,
+                item.feas_rhs,
+                action_ids=range(n),
+            )
+            for i in feasible_bins:
                 x[(item.id, i)] = model.addVar(
                     lb=0.0, ub=1.0, name=f"x_{item.id}_{i}"
                 )
-            if allow_fallback:
+            if action_is_feasible(item.feas_matrix, item.feas_rhs, fallback_idx):
                 y_fallback[item.id] = model.addVar(
                     lb=0.0, ub=1.0, name=f"y_fallback_{item.id}"
                 )
@@ -233,19 +243,22 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         for item in observed:
             item_vars = [var for (j, i), var in x.items() if j == item.id]
             expr = gp.quicksum(item_vars)
-            if allow_fallback:
+            if item.id in y_fallback:
                 expr += y_fallback[item.id]
             model.addConstr(expr == 1.0, name=f"assign_{item.id}")
 
         obj = gp.quicksum(instance.costs.assignment_costs[j, i] * var for (j, i), var in x.items())
-        if allow_fallback:
+        if y_fallback:
             fallback_cost = self.cfg.costs.huge_fallback
             obj += gp.quicksum(fallback_cost * y for y in y_fallback.values())
         model.setObjective(obj, GRB.MINIMIZE)
 
         model.optimize()
         if model.Status != GRB.OPTIMAL:
-            raise RuntimeError(f"DLA pricing LP not optimal, status={model.Status}")
+            # Keep prior prices (or zeros) to avoid aborting when the pricing LP is infeasible.
+            if self._current_prices:
+                return self._current_prices
+            return {i: np.zeros(d, dtype=float) for i in range(n)}
 
         prices: Dict[int, np.ndarray] = {}
         for i in range(n):
@@ -289,27 +302,13 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         item: OnlineItem,
         state: AssignmentState,
         instance: Instance,
-        feasible_row: Optional[np.ndarray],
     ) -> Optional[Decision]:
         regular_bins = instance.n
         if regular_bins <= 0:
             return None
-        fallback_idx = instance.fallback_action_index
-        cols = regular_bins + (1 if fallback_idx >= 0 else 0)
-        try:
-            feasible_full = current_feasible_row(
-                self.cfg,
-                item,
-                feasible_row,
-                regular_bins,
-                cols,
-                fallback_idx,
-            )
-        except PolicyInfeasibleError:
-            return None
-
-        feasible = feasible_full.reshape(-1)[:regular_bins]
-        if feasible.sum() == 0:
+        if not feasible_action_indices(
+            item.feas_matrix, item.feas_rhs, action_ids=range(regular_bins)
+        ):
             return None
 
         costs = np.array(
@@ -318,10 +317,13 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         )
         cap_matrix = np.asarray(item.cap_matrix, dtype=float)
         capacities = remaining_capacities(self.cfg, state, instance)
+        feas_matrix = np.asarray(item.feas_matrix, dtype=float)[:, :regular_bins]
+        feas_rhs = np.asarray(item.feas_rhs, dtype=float)
         data = build_offline_milp_data_from_arrays(
             cap_matrices=cap_matrix.reshape(1, *cap_matrix.shape),
             costs=costs,
-            feasible=feasible.reshape(1, -1),
+            feas_matrices=[feas_matrix],
+            feas_rhs=[feas_rhs],
             b=capacities,
             fallback_idx=-1,
             slack_enforce=False,
@@ -345,24 +347,9 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         self,
         item: OnlineItem,
         instance: Instance,
-        feasible_row: Optional[np.ndarray],
     ) -> List[int]:
         regular_bins = instance.n
-        fallback_idx = instance.fallback_action_index
-        cols = regular_bins + (1 if fallback_idx >= 0 else 0)
-        try:
-            feasible = current_feasible_row(
-                self.cfg,
-                item,
-                feasible_row,
-                regular_bins,
-                cols,
-                fallback_idx,
-            )
-        except PolicyInfeasibleError:
-            return []
-        row = feasible.reshape(-1)
-        return [idx for idx in range(regular_bins) if row[idx] == 1]
+        return feasible_action_indices(item.feas_matrix, item.feas_rhs, action_ids=range(regular_bins))
 
     def _score(self, bin_id: int, item: OnlineItem, instance: Instance) -> float:
         c_ji = lookup_assignment_cost(self.cfg, instance, item.id, bin_id)
@@ -400,16 +387,18 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         zero_vec = np.zeros_like(ctx.effective_caps[0])
         volume = ctx.offline_volumes.get(offline_id, zero_vec)
         instance = ctx.instance
-        feasible_row = instance.offline_feasible.feasible[offline_id]
         regular_bins = instance.n
         fallback_idx = instance.fallback_action_index
+        offline_item = instance.offline_items[offline_id]
 
         best_candidate: Optional[int] = None
         best_cost = float("inf")
         best_residual = float("inf")
 
         for candidate in range(regular_bins):
-            if candidate == origin_bin or feasible_row[candidate] != 1:
+            if candidate == origin_bin or not action_is_feasible(
+                offline_item.feas_matrix, offline_item.feas_rhs, candidate
+            ):
                 continue
             residual_vec = residual_vector(ctx.loads[candidate], volume, ctx.effective_caps[candidate])
             if not vector_fits(ctx.loads[candidate], volume, ctx.effective_caps[candidate], TOLERANCE):
@@ -426,10 +415,6 @@ class DynamicLearningPolicy(BaseOnlinePolicy):
         if best_candidate is not None:
             return best_candidate
 
-        if (
-            self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
-            and fallback_idx < feasible_row.shape[0]
-            and feasible_row[fallback_idx] == 1
-        ):
+        if action_is_feasible(offline_item.feas_matrix, offline_item.feas_rhs, fallback_idx):
             return fallback_idx
         return None

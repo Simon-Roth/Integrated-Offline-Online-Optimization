@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-import numpy as np
 from typing import List, Tuple
 
 from generic.config import Config
@@ -9,6 +8,7 @@ from generic.models import AssignmentState, Instance, Decision
 from generic.online.models import OnlineSolutionInfo
 from generic.online.policies import BaseOnlinePolicy, PolicyInfeasibleError
 from generic.online import state_utils
+from generic.general_utils import action_is_feasible
 
 
 class OnlineSolver:
@@ -36,6 +36,7 @@ class OnlineSolver:
         Execute the online phase starting from 'initial_state'.
         """
         if not instance.online_items:
+            # Nothing to process: return a clean clone and a zero-cost summary
             state_copy = state_utils.clone_state(initial_state)
             info = OnlineSolutionInfo(
                 status="NO_ITEMS",
@@ -47,11 +48,9 @@ class OnlineSolver:
             )
             return state_copy, info
 
-        feasible_matrix = None
-        if instance.online_feasible is not None:
-            feasible_matrix = instance.online_feasible.feasible
-
+        # Work on a cloned state so the offline allocation remains intact.
         state = state_utils.clone_state(initial_state)
+        # Cache A_t^{cap} lookups for all items to speed up state updates.
         cap_lookup = state_utils.build_cap_lookup(instance)
         decisions: List[Decision] = []
         total_objective = 0.0
@@ -59,28 +58,23 @@ class OnlineSolver:
 
         start_time = time.perf_counter()
 
-        for idx, item in enumerate(instance.online_items):
-            feasible_row = None
-            if feasible_matrix is not None:
-                if idx >= feasible_matrix.shape[0]:
-                    raise IndexError(
-                        f"Feasibility matrix has fewer rows ({feasible_matrix.shape[0]}) "
-                        f"than online items ({len(instance.online_items)})."
-                    )
-                feasible_row = feasible_matrix[idx, :]
-
+        for item in instance.online_items:
             decision = None
             try:
-                decision = self.policy.select_action(item, state, instance, feasible_row)
+                # Let the policy pick an action based on the current state.
+                decision = self.policy.select_action(item, state, instance)
             except PolicyInfeasibleError:
                 decision = None
 
+            # We have this check as some binpacking heuristics only consider regular "non-fallback" bins. Generic policies do not need that check as feasibility is entirely encoded in Atfeas xt = bt
+            # So they try 1.regular bins 2. evictions if needed and 3. here fallback as last resort
+            # If policy failed or produced disallowed evictions/reassignments, try fallback.
             needs_fallback = decision is None or (
                 not self.cfg.problem.allow_reassignment
                 and (decision.evicted_offline or decision.reassignments)
             )
             if needs_fallback:
-                decision = self._fallback_decision(instance, item, feasible_row)
+                decision = self._fallback_decision(instance, item)
                 if decision is None:
                     info = OnlineSolutionInfo(
                         status="INFEASIBLE",
@@ -91,6 +85,7 @@ class OnlineSolver:
                         decisions=decisions,
                     )
                     return state, info
+            # Apply the decision to the live state (load update + assignments).
             state_utils.apply_decision(
                 decision,
                 item,
@@ -118,9 +113,9 @@ class OnlineSolver:
         self,
         instance: Instance,
         item,
-        feasible_row,
     ) -> Decision | None:
-        if not self._can_fallback_online(instance, feasible_row):
+        # Construct a fallback decision if enabled and feasible for this item.
+        if not self._can_fallback_online(instance, item):
             return None
         fallback_idx = instance.fallback_action_index
         fallback_cost = self._fallback_cost(instance, item.id, fallback_idx)
@@ -134,8 +129,9 @@ class OnlineSolver:
     def _can_fallback_online(
         self,
         instance: Instance,
-        feasible_row,
+        item,
     ) -> bool:
+        # Fallback is controlled by config flags and the local feasibility constraints.
         if not self.cfg.problem.fallback_is_enabled:
             return False
         if not self.cfg.problem.fallback_allowed_online:
@@ -143,13 +139,10 @@ class OnlineSolver:
         fallback_idx = instance.fallback_action_index
         if fallback_idx < 0:
             return False
-        if feasible_row is None:
-            return True
-        if fallback_idx >= feasible_row.shape[0]:
-            return False
-        return bool(feasible_row[fallback_idx] == 1)
+        return action_is_feasible(item.feas_matrix, item.feas_rhs, fallback_idx)
 
     def _fallback_cost(self, instance: Instance, item_id: int, fallback_idx: int) -> float:
+        # Prefer explicit fallback cost if present in the cost matrix.
         costs = instance.costs.assignment_costs
         if (
             costs is not None

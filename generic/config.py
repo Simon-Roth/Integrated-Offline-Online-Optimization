@@ -49,7 +49,7 @@ class CapCoeffGenerationConfig:
 @dataclass
 class FeasibilityGenerationConfig:
     """
-    Feasibility graph parameters:
+    Feasibility sampling parameters (used to build A_t^{feas} rows).
     - p_off: probability an action is feasible for an offline item
     - p_onl: probability an action is feasible for an online item
     """
@@ -152,6 +152,7 @@ class PrimalDualConfig:
     - eta_min: floor for linear/exponential schedules
     - normalize_update: if True, scale update by (usage - b/T) / (b/T)
     - normalize_costs: if True, divide costs by a scale factor
+    - use_remaining_capacity_target: if True, target remaining capacity / remaining steps
     - cost_scale_mode: "assign_mean" | "assign_bounds"
     - cost_scale_min: lower bound for cost scale to avoid divide-by-zero
     """
@@ -161,6 +162,7 @@ class PrimalDualConfig:
     eta_min: float = 0.0
     normalize_update: bool = False
     normalize_costs: bool = False
+    use_remaining_capacity_target: bool = False
     cost_scale_mode: str = "assign_mean"
     cost_scale_min: float = 1e-8
 

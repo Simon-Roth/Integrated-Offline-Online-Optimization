@@ -31,10 +31,7 @@ def _pricing_duals_saa(
 
     sample_count = max(1, len(samples))
     fallback_idx = inst0.fallback_action_index
-    cols = n + (1 if fallback_idx >= 0 else 0)
     M_off = len(inst0.offline_items)
-    # Pricing LP allows fallback to avoid infeasibility when residual capacity is tight.
-    allow_fallback = bool(cfg.problem.fallback_is_enabled)
 
     # Effective capacities (respect slack if online should honor it)
     use_slack = cfg.slack.enforce_slack and getattr(cfg.slack, "apply_to_online", True)
@@ -50,7 +47,8 @@ def _pricing_duals_saa(
 
     cap_list: list[np.ndarray] = []
     costs_list: list[np.ndarray] = []
-    feas_list: list[np.ndarray] = []
+    feas_matrices: list[np.ndarray] = []
+    feas_rhs: list[np.ndarray] = []
     for inst in samples:
         M_onl = len(inst.online_items)
         if M_onl <= 0:
@@ -63,18 +61,9 @@ def _pricing_duals_saa(
             dtype=float,
         )
         costs_list.append(costs)
-        if inst.online_feasible is not None and inst.online_feasible.feasible.size:
-            feas = np.asarray(inst.online_feasible.feasible, dtype=int)
-        else:
-            feas = np.ones((M_onl, cols), dtype=int)
-        if fallback_idx >= 0:
-            if feas.shape[1] == n:
-                fallback_val = 1 if allow_fallback else 0
-                fallback_col = np.full((M_onl, 1), fallback_val, dtype=int)
-                feas = np.hstack([feas, fallback_col])
-            else:
-                feas[:, fallback_idx] = 1 if allow_fallback else 0
-        feas_list.append(feas)
+        for item in inst.online_items:
+            feas_matrices.append(np.asarray(item.feas_matrix, dtype=float))
+            feas_rhs.append(np.asarray(item.feas_rhs, dtype=float))
 
     if not cap_list:
         return np.zeros((n, d), dtype=float)
@@ -82,12 +71,11 @@ def _pricing_duals_saa(
     scale = 1.0 / float(sample_count)
     cap_matrices = np.concatenate(cap_list, axis=0) * scale
     costs = np.vstack(costs_list) * scale
-    feasible = np.vstack(feas_list)
-
     data = build_offline_milp_data_from_arrays(
         cap_matrices=cap_matrices,
         costs=costs,
-        feasible=feasible,
+        feas_matrices=feas_matrices,
+        feas_rhs=feas_rhs,
         b=residual.reshape(-1),
         fallback_idx=fallback_idx,
         slack_enforce=False,

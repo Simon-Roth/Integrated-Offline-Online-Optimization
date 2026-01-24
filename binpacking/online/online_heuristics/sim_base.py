@@ -1,7 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 import json
-from typing import Optional, List, Dict, Set
+from typing import Optional, List, Dict
 
 import numpy as np
 
@@ -14,7 +14,13 @@ from binpacking.online.state_utils import (
     execute_placement,
     TOLERANCE,
 )
-from generic.general_utils import scalarize_vector, residual_vector, vector_fits
+from generic.general_utils import (
+    action_is_feasible,
+    feasible_action_indices,
+    scalarize_vector,
+    residual_vector,
+    vector_fits,
+)
 from binpacking.block_utils import extract_volume
 
 class SimBasePolicy(BaseOnlinePolicy):
@@ -42,10 +48,9 @@ class SimBasePolicy(BaseOnlinePolicy):
         item: OnlineItem,
         state: AssignmentState,
         instance: Instance,
-        feasible_row: Optional[np.ndarray],
     ) -> Decision:
         fallback_idx = instance.fallback_action_index
-        candidate_bins = self._candidate_bins(item, instance, feasible_row)
+        candidate_bins = self._candidate_bins(item, instance)
         if not candidate_bins:
             raise PolicyInfeasibleError(f"No feasible regular bin for online item {item.id}")
 
@@ -115,15 +120,9 @@ class SimBasePolicy(BaseOnlinePolicy):
         self,
         item: OnlineItem,
         instance: Instance,
-        feasible_row: Optional[np.ndarray],
     ) -> List[int]:
-        regular_bins = instance.n
-        candidate_bins: Set[int] = set(item.feasible_actions)
-        if feasible_row is not None:
-            for idx, allowed in enumerate(feasible_row[:regular_bins]):
-                if allowed:
-                    candidate_bins.add(int(idx))
-        return sorted(b for b in candidate_bins if 0 <= b < regular_bins)
+        regular_bins = list(range(instance.n))
+        return feasible_action_indices(item.feas_matrix, item.feas_rhs, action_ids=regular_bins)
 
     def _score(self, bin_id: int, item: OnlineItem, instance: Instance) -> float:
         c_ji = float(instance.costs.assignment_costs[item.id, bin_id])
@@ -161,16 +160,18 @@ class SimBasePolicy(BaseOnlinePolicy):
         zero_vec = np.zeros_like(ctx.effective_caps[0])
         volume = ctx.offline_volumes.get(offline_id, zero_vec)
         instance = ctx.instance
-        feasible_row = instance.offline_feasible.feasible[offline_id]
         regular_bins = instance.n
         fallback_idx = instance.fallback_action_index
+        offline_item = instance.offline_items[offline_id]
 
         best_candidate: Optional[int] = None
         best_cost = float("inf")
         best_residual = float("inf")
 
         for candidate in range(regular_bins):
-            if candidate == origin_bin or feasible_row[candidate] != 1:
+            if candidate == origin_bin or not action_is_feasible(
+                offline_item.feas_matrix, offline_item.feas_rhs, candidate
+            ):
                 continue
             residual_vec = residual_vector(ctx.loads[candidate], volume, ctx.effective_caps[candidate])
             if not vector_fits(ctx.loads[candidate], volume, ctx.effective_caps[candidate], TOLERANCE):
@@ -187,10 +188,6 @@ class SimBasePolicy(BaseOnlinePolicy):
         if best_candidate is not None:
             return best_candidate
 
-        if (
-            self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
-            and fallback_idx < feasible_row.shape[0]
-            and feasible_row[fallback_idx] == 1
-        ):
+        if action_is_feasible(offline_item.feas_matrix, offline_item.feas_rhs, fallback_idx):
             return fallback_idx
         return None

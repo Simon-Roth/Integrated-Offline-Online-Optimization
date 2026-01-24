@@ -12,7 +12,7 @@ from generic.config import Config, load_config
 from generic.data.instance_generators import generate_instance_with_online
 from generic.data.offline_milp_assembly import build_offline_milp_data
 from generic.general_utils import set_global_seed
-from generic.models import Costs, FeasibleGraph, Instance, ItemSpec
+from generic.models import Costs, Instance, ItemSpec
 from generic.offline.offline_solver import OfflineMILPSolver
 
 
@@ -61,15 +61,16 @@ def _build_full_horizon_instance(instance: Instance) -> Instance:
     solves the full-horizon optimum.
     """
     offline_specs = list(instance.offline_items)
-    online_specs = [ItemSpec(id=item.id, cap_matrix=item.cap_matrix) for item in instance.online_items]
+    online_specs = [
+        ItemSpec(
+            id=item.id,
+            cap_matrix=item.cap_matrix,
+            feas_matrix=item.feas_matrix,
+            feas_rhs=item.feas_rhs,
+        )
+        for item in instance.online_items
+    ]
     all_items = offline_specs + online_specs
-
-    offline_feas = instance.offline_feasible.feasible
-    if instance.online_feasible is not None:
-        online_feas = instance.online_feasible.feasible
-        feas_full = np.vstack([offline_feas, online_feas])
-    else:
-        feas_full = offline_feas.copy()
 
     costs = Costs(
         assignment_costs=instance.costs.assignment_costs.copy(),
@@ -85,10 +86,8 @@ def _build_full_horizon_instance(instance: Instance) -> Instance:
         b=instance.b.copy(),
         offline_items=all_items,
         costs=costs,
-        offline_feasible=FeasibleGraph(feasible=feas_full),
         fallback_action_index=instance.fallback_action_index,
         online_items=[],
-        online_feasible=None,
     )
 
 

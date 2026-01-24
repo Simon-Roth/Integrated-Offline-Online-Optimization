@@ -1,6 +1,6 @@
 # generic/general_utils.py
 from __future__ import annotations
-from typing import Iterable, Sequence, Optional
+from typing import Iterable, Sequence, Optional, List
 import random
 import numpy as np
 
@@ -79,3 +79,36 @@ def residual_vector(load: np.ndarray, usage: np.ndarray, capacity: np.ndarray) -
 def usage_total(usage: np.ndarray) -> float:
     """Total usage for per-usage penalties (L1)."""
     return float(np.sum(np.asarray(usage, dtype=float)))
+
+
+def action_is_feasible(
+    feas_matrix: np.ndarray,
+    feas_rhs: np.ndarray,
+    action_id: int,
+) -> bool:
+    """
+    Return True if the one-hot action satisfies A_t^{feas} x_t = b_t.
+    """
+    A = np.asarray(feas_matrix, dtype=float)
+    b = np.asarray(feas_rhs, dtype=float).reshape(-1)
+    if A.ndim != 2 or b.size != A.shape[0]:
+        raise ValueError("feas_matrix and feas_rhs have incompatible shapes.")
+    if action_id < 0 or action_id >= A.shape[1]:
+        return False
+    vec = np.zeros((A.shape[1],), dtype=float)
+    vec[action_id] = 1.0
+    return bool(np.allclose(A @ vec, b))
+
+
+def feasible_action_indices(
+    feas_matrix: np.ndarray,
+    feas_rhs: np.ndarray,
+    *,
+    action_ids: Optional[Iterable[int]] = None,
+) -> List[int]:
+    """
+    Return all action indices whose one-hot selection satisfies A_t^{feas} x_t = b_t.
+    """
+    A = np.asarray(feas_matrix, dtype=float)
+    candidates = list(range(A.shape[1])) if action_ids is None else list(action_ids)
+    return [i for i in candidates if action_is_feasible(A, feas_rhs, i)]

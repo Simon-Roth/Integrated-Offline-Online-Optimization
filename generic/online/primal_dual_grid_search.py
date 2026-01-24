@@ -21,6 +21,7 @@ GRID_PROFILES = (
         "label": "raw",
         "normalize_update": False,
         "normalize_costs": False,
+        "use_remaining_capacity_target": (False, True),
         "cost_scale_modes": ("assign_mean",),
         "eta_modes": ("constant", "sqrt"),
         # Raw updates use absolute units; small eta0 keeps lambda from overpowering costs.
@@ -32,6 +33,7 @@ GRID_PROFILES = (
         "label": "norm_update",
         "normalize_update": True,
         "normalize_costs": False,
+        "use_remaining_capacity_target": (False, True),
         "cost_scale_modes": ("assign_mean",),
         "eta_modes": ("constant", "sqrt", "exponential"),
         "eta0s": (0.05, 0.1, 0.2, 0.3),
@@ -42,6 +44,7 @@ GRID_PROFILES = (
         "label": "norm_update_costs",
         "normalize_update": True,
         "normalize_costs": True,
+        "use_remaining_capacity_target": (False, True),
         "cost_scale_modes": ("assign_mean", "assign_bounds"),
         "eta_modes": ("constant", "sqrt", "exponential"),
         "eta0s": (0.05, 0.1, 0.2, 0.3),
@@ -75,6 +78,7 @@ def _iter_param_grid(
         eta0s = eta0s_override or profile["eta0s"]
         eta_decays = eta_decays_override or profile["eta_decays"]
         eta_mins = eta_mins_override or profile["eta_mins"]
+        rem_targets = profile.get("use_remaining_capacity_target", (False,))
         for cost_mode in profile["cost_scale_modes"]:
             for mode in eta_modes:
                 mode_lower = str(mode).lower()
@@ -83,16 +87,18 @@ def _iter_param_grid(
                 for eta0 in eta0s:
                     for decay in decays:
                         for eta_min in mins:
-                            yield {
-                                "profile": profile["label"],
-                                "normalize_update": profile["normalize_update"],
-                                "normalize_costs": profile["normalize_costs"],
-                                "cost_scale_mode": str(cost_mode),
-                                "eta_mode": mode_lower,
-                                "eta0": float(eta0),
-                                "eta_decay": float(decay),
-                                "eta_min": float(eta_min),
-                            }
+                            for rem_target in rem_targets:
+                                yield {
+                                    "profile": profile["label"],
+                                    "normalize_update": profile["normalize_update"],
+                                    "normalize_costs": profile["normalize_costs"],
+                                    "use_remaining_capacity_target": bool(rem_target),
+                                    "cost_scale_mode": str(cost_mode),
+                                    "eta_mode": mode_lower,
+                                    "eta0": float(eta0),
+                                    "eta_decay": float(decay),
+                                    "eta_min": float(eta_min),
+                                }
 
 
 def _apply_primal_dual_params(cfg, params: Dict[str, Any], horizon: int) -> None:
@@ -102,6 +108,7 @@ def _apply_primal_dual_params(cfg, params: Dict[str, Any], horizon: int) -> None
     cfg.primal_dual.eta_min = float(params["eta_min"])
     cfg.primal_dual.normalize_update = bool(params["normalize_update"])
     cfg.primal_dual.normalize_costs = bool(params["normalize_costs"])
+    cfg.primal_dual.use_remaining_capacity_target = bool(params["use_remaining_capacity_target"])
     cfg.primal_dual.cost_scale_mode = str(params["cost_scale_mode"])
     cfg.problem.M_off = 0
     cfg.stoch.horizon = int(horizon)
@@ -244,6 +251,7 @@ def main() -> None:
             "profile": params["profile"],
             "normalize_update": params["normalize_update"],
             "normalize_costs": params["normalize_costs"],
+            "use_remaining_capacity_target": params["use_remaining_capacity_target"],
             "cost_scale_mode": params["cost_scale_mode"],
             "eta_mode": params["eta_mode"],
             "eta0": params["eta0"],

@@ -45,7 +45,6 @@ class OfflineMILPSolver:
         self.fallback_idx: int = -1
         self.m: int = 0
         self.cap_matrices: Optional[np.ndarray] = None
-        self.feas: Optional[np.ndarray] = None
 
     # ---------- Public API ----------
 
@@ -101,7 +100,6 @@ class OfflineMILPSolver:
         self.fallback_idx = data.fallback_idx
         self.m = data.m
         self.cap_matrices = data.cap_matrices
-        self.feas = data.feasible
         if self.fallback_idx >= 0:
             assert self.fallback_idx == self.n, "Expected fallback index to be n (0-based)."
 
@@ -140,8 +138,6 @@ class OfflineMILPSolver:
         M, Np1 = self.var_shape
         for j, i in warm_start.items():
             if not (0 <= j < M and 0 <= i < Np1):
-                continue
-            if self.feas is not None and self.feas[j, i] == 0:
                 continue
             idx = j * Np1 + i
             self.x[idx].Start = 1.0

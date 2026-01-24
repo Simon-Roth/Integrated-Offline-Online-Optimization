@@ -4,7 +4,12 @@ from typing import Dict, List, Tuple
 
 from generic.models import Instance, AssignmentState
 from generic.offline.offline_policies import BaseOfflinePolicy
-from generic.general_utils import effective_capacity, scalarize_vector, vector_fits
+from generic.general_utils import (
+    action_is_feasible,
+    effective_capacity,
+    scalarize_vector,
+    vector_fits,
+)
 from generic.offline.models import OfflineSolutionInfo
 from binpacking.block_utils import block_dim, extract_volume, split_capacities
 
@@ -50,7 +55,7 @@ class FirstFitDecreasing(BaseOfflinePolicy):
             for bin_idx in range(n):
                 # Check feasibility and capacity
                 if (
-                    inst.offline_feasible.feasible[item_idx, bin_idx] == 1
+                    action_is_feasible(item.feas_matrix, item.feas_rhs, bin_idx)
                     and vector_fits(loads[bin_idx], volume, eff_caps[bin_idx])
                 ):
                     
@@ -62,9 +67,8 @@ class FirstFitDecreasing(BaseOfflinePolicy):
             # Use fallback if enabled and no regular bin found
             if not assigned:
                 if (
-                    self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
-                    and inst.fallback_action_index >= 0
-                    and inst.offline_feasible.feasible[item_idx, inst.fallback_action_index] == 1
+                    inst.fallback_action_index >= 0
+                    and action_is_feasible(item.feas_matrix, item.feas_rhs, inst.fallback_action_index)
                 ):
                     assigned_action[item_idx] = inst.fallback_action_index
                 else:

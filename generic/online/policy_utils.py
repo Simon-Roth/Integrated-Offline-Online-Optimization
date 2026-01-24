@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 
 from generic.config import Config
 from generic.general_utils import effective_capacity
-from generic.models import AssignmentState, Instance, OnlineItem
+from generic.models import AssignmentState, Instance
 class PolicyInfeasibleError(Exception):
     """Raised when a policy cannot produce a feasible placement for the arriving item."""
 
@@ -28,41 +26,6 @@ def current_cost_row(
         return row
     row[: min(cols, costs.shape[1])] = costs[item_id, : min(cols, costs.shape[1])]
     return row
-
-
-def current_feasible_row(
-    cfg: Config,
-    item: OnlineItem,
-    feasible_row: Optional[np.ndarray],
-    n: int,
-    cols: int,
-    fallback_idx: int,
-) -> np.ndarray:
-    """Return feasibility row for the current item (with fallback column if enabled)."""
-    if feasible_row is not None:
-        row = np.asarray(feasible_row, dtype=int).reshape(-1)
-        if row.size == cols:
-            if row.sum() == 0:
-                raise PolicyInfeasibleError("No feasible action for current item.")
-            return row.reshape(1, -1)
-        if row.size == n:
-            if cols > n:
-                fallback_val = 1 if cfg.problem.fallback_allowed_online else 0
-                row = np.concatenate([row, np.array([fallback_val], dtype=int)])
-            if row.sum() == 0:
-                raise PolicyInfeasibleError("No feasible action for current item.")
-            return row.reshape(1, -1)
-        raise ValueError(f"Feasible row has length {row.size}, expected {n} or {cols}.")
-
-    row = np.zeros((cols,), dtype=int)
-    for action_id in item.feasible_actions:
-        if 0 <= action_id < n:
-            row[action_id] = 1
-    if cols > n:
-        row[fallback_idx] = 1 if cfg.problem.fallback_allowed_online else 0
-    if row.sum() == 0:
-        raise PolicyInfeasibleError("No feasible action for current item.")
-    return row.reshape(1, -1)
 
 
 def remaining_capacities(

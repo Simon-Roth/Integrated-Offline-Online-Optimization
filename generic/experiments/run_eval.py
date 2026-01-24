@@ -169,7 +169,10 @@ def run_eval(
             policy_path = f"{online_policy_cls.__module__}.{online_policy_cls.__name__}"
         policy_kwargs: Dict[str, Any] = {}
         if policy_path and online_policy_needs_prices(policy_path):
-            from binpacking.online.prices import compute_prices
+            if policy_path == ONLINE_SIM_DUAL:
+                from generic.online.generic_pricing import compute_prices
+            else:
+                from binpacking.online.prices import compute_prices
 
             price_path_str = online_policy_price_path(policy_path)
             if price_path_str is None:

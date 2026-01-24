@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional, Set, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import numpy
+from typing import List, Optional
 
 import numpy as np
 
@@ -16,7 +13,13 @@ from binpacking.online.state_utils import (
     execute_placement,
     TOLERANCE,
 )
-from generic.general_utils import scalarize_vector, residual_vector, vector_fits
+from generic.general_utils import (
+    action_is_feasible,
+    feasible_action_indices,
+    scalarize_vector,
+    residual_vector,
+    vector_fits,
+)
 
 
 class CostAwareBestFitOnlinePolicy(BaseOnlinePolicy):
@@ -33,9 +36,8 @@ class CostAwareBestFitOnlinePolicy(BaseOnlinePolicy):
         item: OnlineItem,
         state: AssignmentState,
         instance: Instance,
-        feasible_row: Optional["numpy.ndarray"],
     ) -> Decision:
-        candidate_bins = self._candidate_bins(item, instance, feasible_row)
+        candidate_bins = self._candidate_bins(item, instance)
         if not candidate_bins:
             raise PolicyInfeasibleError(f"No feasible regular bin for online item {item.id}")
 
@@ -129,15 +131,9 @@ class CostAwareBestFitOnlinePolicy(BaseOnlinePolicy):
         self,
         item: OnlineItem,
         instance: Instance,
-        feasible_row: Optional["numpy.ndarray"],
     ) -> List[int]:
-        bins: Set[int] = set(item.feasible_actions)
-        if feasible_row is not None:
-            regular_actions = instance.n
-            for idx, allowed in enumerate(feasible_row[:regular_actions]):
-                if allowed:
-                    bins.add(int(idx))
-        return sorted(b for b in bins if 0 <= b < instance.n)
+        regular_actions = list(range(instance.n))
+        return feasible_action_indices(item.feas_matrix, item.feas_rhs, action_ids=regular_actions)
 
     def _eviction_order_desc(
         self,
@@ -167,16 +163,18 @@ class CostAwareBestFitOnlinePolicy(BaseOnlinePolicy):
         zero_vec = np.zeros_like(ctx.effective_caps[0])
         volume = ctx.offline_volumes.get(offline_id, zero_vec)
         instance = ctx.instance
-        feasible_row = instance.offline_feasible.feasible[offline_id]
         regular_bins = instance.n
         fallback_idx = instance.fallback_action_index
+        offline_item = instance.offline_items[offline_id]
 
         best_candidate: Optional[int] = None
         best_cost = float("inf")
         best_residual = float("inf")
 
         for candidate in range(regular_bins):
-            if candidate == origin_bin or feasible_row[candidate] != 1:
+            if candidate == origin_bin or not action_is_feasible(
+                offline_item.feas_matrix, offline_item.feas_rhs, candidate
+            ):
                 continue
             residual_vec = residual_vector(ctx.loads[candidate], volume, ctx.effective_caps[candidate])
             if not vector_fits(ctx.loads[candidate], volume, ctx.effective_caps[candidate], TOLERANCE):
@@ -193,10 +191,6 @@ class CostAwareBestFitOnlinePolicy(BaseOnlinePolicy):
         if best_candidate is not None:
             return best_candidate
 
-        if (
-            self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
-            and fallback_idx < feasible_row.shape[0]
-            and feasible_row[fallback_idx] == 1
-        ):
+        if action_is_feasible(offline_item.feas_matrix, offline_item.feas_rhs, fallback_idx):
             return fallback_idx
         return None

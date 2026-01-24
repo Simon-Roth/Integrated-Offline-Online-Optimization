@@ -35,7 +35,7 @@ The documentation below is organized by module and describes:
 The typical flow for a single experiment run is:
 
 1) Load config (generic or binpacking override).
-2) Generate an instance (offline items, online items, feasibility masks, costs) from the config.
+2) Generate an instance (offline items, online items, local feasibility constraints, costs) from the config.
 3) Assemble offline MILP data (A, b, c) from the instance.
 4) Solve the offline problem (MILP or heuristic).
 5) Run the online policy sequentially on online items.
@@ -83,18 +83,15 @@ so binpacking experiments can change only what is needed.
 ### `generic/models.py`
 Defines the core types that all phases share.
 
-- `ItemSpec`: id and A_t^{cap} matrix.
-- `OnlineItem`: arriving online item, with feasible regular actions list.
+- `ItemSpec`: id, A_t^{cap}, and local feasibility (A_t^{feas}, b_t).
+- `OnlineItem`: arriving online item, with A_t^{cap} and local feasibility (A_t^{feas}, b_t).
 - `Costs`: assignment costs matrix, fallback cost, eviction penalty settings.
-- `FeasibleGraph`: item-by-action feasibility mask (0/1).
 - `Instance`: the full problem instance:
   - n, m, b
   - offline_items
   - costs
-  - offline_feasible
   - fallback_action_index
   - online_items (optional)
-  - online_feasible (optional)
 - `AssignmentState`: mutable state of loads and assignments.
 - `Decision`: what a policy decided for one online item (placement, evictions,
   reassignments, incremental objective).
@@ -112,25 +109,27 @@ Defines the core types that all phases share.
 ## Instance generation and MILP assembly
 
 ### `generic/data/instance_generators.py`
-Responsible for sampling A_t^{cap}, feasibility, and costs from the config.
+Responsible for sampling A_t^{cap}, local feasibility (A_t^{feas}, b_t), and costs from the config.
 
 Key functions:
 - `generate_instance_with_online(cfg, seed, M_onl=...)`:
   - samples capacity vector b (or uses provided list),
   - samples offline A_t^{cap} coefficients,
-  - builds offline feasibility mask with probability `p_off`,
-  - adds fallback column if fallback is enabled and allowed,
+  - samples offline feasible actions with probability `p_off` and encodes them as
+    explicit local constraints A_t^{feas} x_t = b_t (one-hot + forbidden actions),
   - samples offline assignment costs,
-  - samples online A_t^{cap} coefficients and online feasibility mask with probability `p_onl`, then calls `_ensure_row_feasible` to guarantee each online item has at least one feasible regular action,
+  - samples online A_t^{cap} coefficients and feasible actions with probability `p_onl`,
+    then builds A_t^{feas} x_t = b_t and calls `_ensure_row_feasible` to guarantee at least
+    one feasible regular action,
   - appends online costs to the cost matrix.
 - `generate_offline_instance(cfg, seed)`:
   - wrapper that calls `generate_instance_with_online` with `M_onl=0`.
 
-This file is the source of truth for how feasibility is generated:
-- Offline feasibility uses `cfg.feasibility.p_off`.
+This file is the source of truth for how local feasibility is generated:
+- Offline feasibility uses `cfg.feasibility.p_off` and is encoded in A_t^{feas}, b_t.
 - Online feasibility uses `cfg.feasibility.p_onl` and `_ensure_row_feasible`.
 - Fallback feasibility for offline and online is controlled by
-  `fallback_allowed_offline` and `fallback_allowed_online`.
+  `fallback_allowed_offline` and `fallback_allowed_online` via A_t^{feas} rows.
 
 ### Binpacking vs. generic problems
 Binpacking is encoded in the instance generation and block utilities, not in the
@@ -160,8 +159,7 @@ Key functions:
 - `build_offline_milp_data_from_arrays(...)`:
   - builds capacity constraints over m resources,
   - does not add capacity constraints for the fallback action,
-  - adds assignment constraints using two inequalities (sum == 1),
-  - adds infeasibility constraints (sum of infeasible edges == 0).
+  - adds local feasibility constraints A_t^{feas} x_t = b_t (as two inequalities).
 - `build_offline_milp_data(instance, cfg)`:
   - convenience wrapper: pulls arrays from `Instance` and config.
 
@@ -229,7 +227,7 @@ Important behavior:
 - Fallback placement is controlled by:
   - `fallback_is_enabled`
   - `fallback_allowed_online`
-  - online feasibility mask (fallback column).
+  - per-item A_t^{feas} rows that allow or forbid the fallback action.
 
 ### `generic/online/state_utils.py` (generic core)
 These are generic state mutation helpers used by the online solver:

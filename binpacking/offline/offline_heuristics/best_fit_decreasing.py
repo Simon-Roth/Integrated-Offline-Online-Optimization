@@ -4,7 +4,13 @@ from typing import Dict, List, Tuple
 
 from generic.models import Instance, AssignmentState
 from generic.offline.offline_policies import BaseOfflinePolicy
-from generic.general_utils import effective_capacity, scalarize_vector, vector_fits, residual_vector
+from generic.general_utils import (
+    action_is_feasible,
+    effective_capacity,
+    scalarize_vector,
+    vector_fits,
+    residual_vector,
+)
 from generic.offline.models import OfflineSolutionInfo
 from binpacking.block_utils import block_dim, extract_volume, split_capacities
 
@@ -49,7 +55,7 @@ class BestFitDecreasing(BaseOfflinePolicy):
             # Find best-fitting bin (minimum remaining space)
             for bin_idx in range(n):
                 if (
-                    inst.offline_feasible.feasible[item_idx, bin_idx] == 1
+                    action_is_feasible(item.feas_matrix, item.feas_rhs, bin_idx)
                     and vector_fits(loads[bin_idx], volume, eff_caps[bin_idx])
                 ):
                     remaining = residual_vector(loads[bin_idx], volume, eff_caps[bin_idx])
@@ -62,9 +68,8 @@ class BestFitDecreasing(BaseOfflinePolicy):
             if best_bin != -1:
                 loads[best_bin] += volume
                 assigned_action[item_idx] = best_bin
-            elif (
-                self.cfg.problem.fallback_is_enabled and self.cfg.problem.fallback_allowed_offline
-                and inst.offline_feasible.feasible[item_idx, inst.fallback_action_index] == 1
+            elif action_is_feasible(
+                item.feas_matrix, item.feas_rhs, inst.fallback_action_index
             ):
                 assigned_action[item_idx] = inst.fallback_action_index
             else:

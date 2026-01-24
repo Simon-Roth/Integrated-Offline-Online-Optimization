@@ -25,7 +25,7 @@ def online_policy_price_path(policy_path: str) -> str | None:
     if policy_path == ONLINE_SIM_BASE:
         return "binpacking/results/sim_base.json"
     if policy_path == ONLINE_SIM_DUAL:
-        return "binpacking/results/sim_dual.json"
+        return "generic/results/sim_dual.json"
     return None
 
 

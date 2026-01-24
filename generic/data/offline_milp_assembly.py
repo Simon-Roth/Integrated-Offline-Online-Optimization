@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 import numpy as np
 
@@ -23,7 +23,6 @@ class OfflineMILPData:
     fallback_idx: int
     m: int
     cap_matrices: np.ndarray
-    feasible: Optional[np.ndarray] = None
 
 
 def _as_length_vector(value: float | Sequence[float], length: int) -> np.ndarray:
@@ -39,7 +38,8 @@ def build_offline_milp_data_from_arrays(
     *,
     cap_matrices: np.ndarray,
     costs: np.ndarray,
-    feasible: np.ndarray,
+    feas_matrices: Sequence[np.ndarray],
+    feas_rhs: Sequence[np.ndarray],
     b: np.ndarray,
     fallback_idx: int,
     slack_enforce: bool,
@@ -48,6 +48,8 @@ def build_offline_milp_data_from_arrays(
     """
     Build offline MILP data from raw arrays. Independent of instance generation.
     cap_matrices: array of shape (M, m, n) with A_t^{cap} per item.
+    feas_matrices: list of A_t^{feas} matrices (shape p_t x n' (n' is n or n+1 dependent on fallback | pt is num of local feas constraints for item t))
+    feas_rhs: list of b_t vectors (shape p_t,)
     """
     cap = np.asarray(cap_matrices, dtype=float)
     if cap.ndim == 2:
@@ -60,15 +62,11 @@ def build_offline_milp_data_from_arrays(
     n = cap.shape[2]
 
     costs = np.asarray(costs, dtype=float)
-    feas = np.asarray(feasible, dtype=int)
     b_vec = _as_length_vector(b, m)
     b_eff = effective_capacity(b_vec, slack_enforce, slack_fraction)
 
     if costs.ndim == 1 and M > 0:
         costs = costs.reshape((M, -1))
-    if feas.ndim == 1 and M > 0:
-        feas = feas.reshape((M, -1))
-
     cols = costs.shape[1] if costs.size else (n + (1 if fallback_idx >= 0 else 0))
     if cols not in (n, n + 1):
         raise ValueError(f"Cost matrix has {cols} columns, expected {n} or {n + 1}.")
@@ -81,8 +79,8 @@ def build_offline_milp_data_from_arrays(
     else:
         fallback_idx = -1
 
-    if feas.size and feas.shape[1] != cols:
-        raise ValueError("Feasibility matrix column count must match costs.")
+    if len(feas_matrices) != M or len(feas_rhs) != M:
+        raise ValueError("feas_matrices and feas_rhs must have length M.")
 
     var_shape = (M, cols)
     num_vars = M * cols
@@ -95,7 +93,6 @@ def build_offline_milp_data_from_arrays(
             fallback_idx=fallback_idx,
             m=m,
             cap_matrices=cap,
-            feasible=feas,
         )
 
     rows: List[np.ndarray] = []
@@ -106,36 +103,36 @@ def build_offline_milp_data_from_arrays(
         row = np.zeros(num_vars, dtype=float)
         for j in range(M):
             for i in range(n):
-                row[j * cols + i] = cap[j, r, i]
+                row[j * cols + i] = cap[j, r, i] 
         rows.append(row)
         rhs.append(float(b_eff[r]))
+    
+    #\sum_{t=1}^M \sum_{i=1}^n A_t^{cap}[r,i] , x_{t,i} \le b_r
+    # M Zeilen
 
-    # Assignment constraints (sum over all actions == 1).
-    for j in range(M):
-        row = np.zeros(num_vars, dtype=float)
-        start = j * cols
-        row[start : start + cols] = 1.0
-        rows.append(row)
-        rhs.append(1.0)
-        rows.append(-row)
-        rhs.append(-1.0)
 
-    # Feasibility constraints (sum of infeasible edges == 0).
+    # Local feasibility constraints A_t^{feas} x_t = b_t (added as two inequalities).
     for j in range(M):
-        infeas_idx = np.flatnonzero(feas[j] == 0)
-        if infeas_idx.size == 0:
-            continue
-        row = np.zeros(num_vars, dtype=float)
+        A_feas = np.asarray(feas_matrices[j], dtype=float)
+        b_t = np.asarray(feas_rhs[j], dtype=float).reshape(-1)
+        if A_feas.ndim != 2:
+            raise ValueError("Each feas_matrix must be 2D.")
+        if A_feas.shape[1] != cols:
+            raise ValueError("Feasibility matrix column count must match costs.")
+        if A_feas.shape[0] != b_t.size:
+            raise ValueError("Feasibility rhs length must match number of rows.")
         start = j * cols
-        for i in infeas_idx:
-            row[start + i] = 1.0
-        rows.append(row)
-        rhs.append(0.0)
+        for row_idx in range(A_feas.shape[0]):
+            row = np.zeros(num_vars, dtype=float)
+            row[start : start + cols] = A_feas[row_idx]
+            rows.append(row)
+            rhs.append(float(b_t[row_idx]))
+            rows.append(-row)
+            rhs.append(float(-b_t[row_idx]))
 
     A = np.vstack(rows) if rows else np.empty((0, num_vars), dtype=float)
     b_arr = np.asarray(rhs, dtype=float)
     c = costs.reshape(-1)
-
     return OfflineMILPData(
         c=c,
         A=A,
@@ -144,8 +141,10 @@ def build_offline_milp_data_from_arrays(
         fallback_idx=fallback_idx,
         m=m,
         cap_matrices=cap,
-        feasible=feas,
     )
+    # A: m capacity rows + 2 * sum_t p_t feasibility rows | M * n (or n+1) columns
+    
+    
 
 
 def build_offline_milp_data(
@@ -160,11 +159,11 @@ def build_offline_milp_data(
     else:
         cap_matrices = np.empty((0, int(inst.m), int(inst.n)), dtype=float)
     costs = np.asarray(inst.costs.assignment_costs[: len(inst.offline_items), :], dtype=float)
-    feasible = np.asarray(inst.offline_feasible.feasible[: len(inst.offline_items), :], dtype=int)
     return build_offline_milp_data_from_arrays(
         cap_matrices=cap_matrices,
         costs=costs,
-        feasible=feasible,
+        feas_matrices=[it.feas_matrix for it in inst.offline_items],
+        feas_rhs=[it.feas_rhs for it in inst.offline_items],
         b=inst.b,
         fallback_idx=inst.fallback_action_index,
         slack_enforce=cfg.slack.enforce_slack,
