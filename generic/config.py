@@ -194,6 +194,7 @@ class EvalConfig:
     - seeds: list of RNG seeds for repeated runs
     """
     seeds: Tuple[int, ...] = (1, 2, 3)
+    track_offline_util_for_binpacking: bool = False
 
 @dataclass
 class Config:
@@ -229,7 +230,10 @@ def load_config_data(data: dict) -> Config:
         primal_dual=PrimalDualConfig(**data.get("primal_dual", {})),
         solver=SolverConfig(**data.get("solver", {})),
         heuristics=HeuristicConfig(**data.get("heuristics", {})),
-        eval=EvalConfig(tuple(data["eval"]["seeds"])),
+        eval=EvalConfig(
+            tuple(data["eval"]["seeds"]),
+            bool(data["eval"].get("track_offline_util_for_binpacking", False)),
+        ),
     )
 
 

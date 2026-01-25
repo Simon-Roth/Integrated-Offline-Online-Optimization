@@ -12,7 +12,7 @@ import numpy as np
 from generic.config import Config, load_config
 from generic.data.instance_generators import generate_instance_with_online
 from generic.data.offline_milp_assembly import build_offline_milp_data
-from generic.general_utils import set_global_seed
+from generic.general_utils import effective_capacity, set_global_seed
 from generic.experiments.pipeline_registry import (
     ONLINE_SIM_DUAL,
     online_policy_needs_prices,
@@ -102,8 +102,9 @@ def _build_run_summary(
     offline_fallback: int,
     final_fallback: int,
     instance: Any,
+    offline_util_per_bin: List[float] | None = None,
 ) -> Dict[str, Any]:
-    return {
+    summary = {
         "seed": seed,
         "problem": {
             "n": int(instance.n),
@@ -131,6 +132,9 @@ def _build_run_summary(
             "apply_to_online": bool(getattr(cfg.slack, "apply_to_online", True)),
         },
     }
+    if offline_util_per_bin is not None:
+        summary["offline_util_per_bin"] = offline_util_per_bin
+    return summary
 
 
 def run_eval(
@@ -144,6 +148,8 @@ def run_eval(
     online_policy_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     runs: List[Dict[str, Any]] = []
+    offline_util_means: List[float] = []
+    track_offline_util = bool(getattr(cfg.eval, "track_offline_util_for_binpacking", False))
 
     for seed in seeds:
         set_global_seed(seed)
@@ -163,6 +169,26 @@ def run_eval(
             )
         else:
             offline_state, offline_info = offline_solver.solve(instance)
+
+        per_bin_util: List[float] | None = None
+        if track_offline_util:
+            if instance.n <= 0 or instance.m % instance.n != 0:
+                raise ValueError(
+                    f"track_offline_util_for_binpacking expects m = n * d. "
+                    f"Got n={instance.n}, m={instance.m}."
+                )
+            b_eff = np.asarray(
+                effective_capacity(instance.b, cfg.slack.enforce_slack, cfg.slack.fraction),
+                dtype=float,
+            )
+            load = np.asarray(offline_state.load, dtype=float)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                util = np.where(b_eff > 0, load / b_eff, np.nan)
+            d = instance.m // instance.n
+            util_bins = util.reshape(instance.n, d)
+            per_bin_mean = np.nanmean(util_bins, axis=1)
+            offline_util_means.append(float(np.nanmean(per_bin_mean)))
+            per_bin_util = per_bin_mean.astype(float).tolist()
 
         policy_path = online_policy_name
         if policy_path is None:
@@ -224,6 +250,7 @@ def run_eval(
                 offline_fallback,
                 final_fallback,
                 instance,
+                per_bin_util,
             )
         )
 
@@ -258,8 +285,9 @@ def run_eval(
         offline_statuses[offline_status] = offline_statuses.get(offline_status, 0) + 1
         online_statuses[online_status] = online_statuses.get(online_status, 0) + 1
 
-    per_seed = [
-        {
+    per_seed = []
+    for run in runs:
+        entry = {
             "seed": run["seed"],
             "offline_objective": run["offline"]["objective"],
             "online_objective": run["online"]["objective"],
@@ -269,8 +297,9 @@ def run_eval(
             "offline_status": run["offline"]["status"],
             "online_status": run["online"]["status"],
         }
-        for run in runs
-    ]
+        if "offline_util_per_bin" in run:
+            entry["offline_util_per_bin"] = run["offline_util_per_bin"]
+        per_seed.append(entry)
 
     summary = {
         "seed_count": len(seeds),
@@ -289,6 +318,8 @@ def run_eval(
             "online_failures": int(online_failures),
         },
     }
+    if track_offline_util:
+        summary["aggregate"]["offline_utilization_mean"] = _mean_or_placeholder(offline_util_means)
     return summary
 
 

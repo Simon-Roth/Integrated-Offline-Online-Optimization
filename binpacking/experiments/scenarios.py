@@ -204,6 +204,34 @@ for tag, p_onl in [("dense", 0.8), ("sparse", 0.2)]:
         )
     )
 
+# ========= FAMILY 3B: GRAPH SPARSITY (only p_onl changes), purely online (0/100) =========
+for tag, p_onl in [("dense", 0.8), ("sparse", 0.2)]:
+    SCENARIO_SWEEP.append(
+        ScenarioConfig(
+            name=f"graph_{tag}_off0_on100",
+            overrides={
+                **ratio_overrides(0),
+                **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
+                **base_cost_graph_overrides(),
+                "feasibility": {"p_off": 0.8, "p_onl": p_onl},
+            },
+            description="Graph feasibility test (online sparsity) for purely online setting.",
+        )
+    )
+
+SCENARIO_SWEEP.append(
+    ScenarioConfig(
+        name="graph_mid_off0_on100",
+        overrides={
+            **ratio_overrides(0),
+            **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
+            **base_cost_graph_overrides(),
+            "feasibility": {"p_off": 0.8, "p_onl": 0.5},
+        },
+        description="Graph feasibility test (online sparsity) for purely online setting (mid density).",
+    )
+)
+
 # ========= FAMILY 4: LOAD REGIME (b_mean changes), fixed ratio (50/50) =========
 
 for tag, cap_mean in [("underload", 1880.0), ("overload", 1360.0)]:
