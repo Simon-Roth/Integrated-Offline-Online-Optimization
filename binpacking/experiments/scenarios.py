@@ -71,7 +71,7 @@ DEFAULT_BOUNDS = (30, 180)
 # Usage variance levels (same mean, different variance)
 VOL_LOW_VAR   = (9.0, 21.0)   # kappa=30 (low variance)
 VOL_MID_VAR   = (3.0, 7.0)   # kappa=20 (medium variance)
-VOL_HIGH_VAR_UNIFORM  = (1.0, 1.0)    # kappa=10 (high variance)
+VOL_HIGH_VAR_UNIFORM  = (0.3, 0.3)    # very high variance (U-shaped)
 
 # Uniform baseline on [0,1] is Beta(1,1)
 VOL_UNIFORM_01 = (1.0, 1.0)
@@ -140,63 +140,63 @@ SCENARIO_SWEEP: List[ScenarioConfig] = []
 #         )
 #     )
 
-# ========= FAMILY 2: COEFF VARIANCE (ceteris paribus mean & bounds), fixed ratio (50/50) =========
-# Baseline is VOL_MID_VAR = Beta(3,7) on DEFAULT_BOUNDS.
-# We compare:
-# - lowvar: more concentrated Beta with same mean
-# - highvar: uniform Beta(1,1) (higher uncertainty) with b_mean adjusted to keep load comparable
-SCENARIO_SWEEP.append(
-    ScenarioConfig(
-        name="vol_midvar_off50_on50",
-        overrides={
-            **ratio_overrides(100),
-            **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
-            **base_cost_graph_overrides(),
-        },
-        description="Coeff dispersion baseline (mid variance): Beta(3,7) on [30,180].",
-    )
-)
+# # ========= FAMILY 2: COEFF VARIANCE (ceteris paribus mean & bounds), fixed ratio (60/40) =========
+# # Baseline is VOL_MID_VAR = Beta(3,7) on DEFAULT_BOUNDS.
+# # We compare:
+# # - lowvar: more concentrated Beta with same mean
+# # - highvar: U-shaped Beta(0.3,0.3) (higher uncertainty) with b_mean adjusted to keep load comparable
+# SCENARIO_SWEEP.append(
+#     ScenarioConfig(
+#         name="vol_midvar_off60_on40",
+#         overrides={
+#             **ratio_overrides(120),
+#             **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
+#             **base_cost_graph_overrides(),
+#         },
+#         description="Coeff dispersion baseline (mid variance): Beta(3,7) on [30,180].",
+#     )
+# )
 
-SCENARIO_SWEEP.append(
-    ScenarioConfig(
-        name="vol_lowvar_off50_on50",
-        overrides={
-            **ratio_overrides(100),
-            **volume_overrides(VOL_LOW_VAR, DEFAULT_BOUNDS),
-            **base_cost_graph_overrides(),
-        },
-        description="Lower coeff variance than baseline (same mean): e.g., Beta(6,14) on [30,180].",
-    )
-)
+# SCENARIO_SWEEP.append(
+#     ScenarioConfig(
+#         name="vol_lowvar_off60_on40",
+#         overrides={
+#             **ratio_overrides(120),
+#             **volume_overrides(VOL_LOW_VAR, DEFAULT_BOUNDS),
+#             **base_cost_graph_overrides(),
+#         },
+#         description="Lower coeff variance than baseline (same mean): e.g., Beta(6,14) on [30,180].",
+#     )
+# )
 
-# High-uncertainty control: Uniform Beta(1,1) but keep global load comparable by adjusting b_mean
-baseline_Ev = mean_scaled_beta(DEFAULT_BOUNDS, VOL_MID_VAR)                 
-uniform_Ev  = mean_scaled_beta(DEFAULT_BOUNDS, VOL_HIGH_VAR_UNIFORM)       
-baseline_cap_mean = 1680.0
-uniform_cap_mean = baseline_cap_mean * (uniform_Ev / baseline_Ev)          
+# # High-uncertainty control: U-shaped Beta(0.3,0.3) but keep global load comparable by adjusting b_mean
+# baseline_Ev = mean_scaled_beta(DEFAULT_BOUNDS, VOL_MID_VAR)                 
+# uniform_Ev  = mean_scaled_beta(DEFAULT_BOUNDS, VOL_HIGH_VAR_UNIFORM)       
+# baseline_cap_mean = 1680.0
+# uniform_cap_mean = baseline_cap_mean * (uniform_Ev / baseline_Ev)          
 
-uniform_base = ratio_overrides(100)
-uniform_base["problem"]["b_mean"] = float(uniform_cap_mean)
-SCENARIO_SWEEP.append(
-    ScenarioConfig(
-        name="vol_highuncert_uniform_same_load_off50_on50",
-        overrides={
-            **uniform_base,
-            **volume_overrides(VOL_HIGH_VAR_UNIFORM, DEFAULT_BOUNDS),
-            **base_cost_graph_overrides(),
-        },
-        description="High-uncertainty control: Uniform coeffs with adjusted b_mean to match baseline load.",
-    )
-)
+# uniform_base = ratio_overrides(120)
+# uniform_base["problem"]["b_mean"] = float(uniform_cap_mean)
+# SCENARIO_SWEEP.append(
+#     ScenarioConfig(
+#         name="vol_highuncert_uniform_same_load_off60_on40",
+#         overrides={
+#             **uniform_base,
+#             **volume_overrides(VOL_HIGH_VAR_UNIFORM, DEFAULT_BOUNDS),
+#             **base_cost_graph_overrides(),
+#         },
+#         description="High-uncertainty control: U-shaped Beta(0.3,0.3) coeffs with adjusted b_mean to match baseline load.",
+#     )
+# )
 
 
-# # ========= FAMILY 3: GRAPH SPARSITY (only p_onl changes), fixed ratio (50/50) =========
+# # ========= FAMILY 3: GRAPH SPARSITY (only p_onl changes), fixed ratio (60/40) =========
 # for tag, p_onl in [("dense", 0.8), ("sparse", 0.2)]:
 #     SCENARIO_SWEEP.append(
 #         ScenarioConfig(
-#             name=f"graph_{tag}_off50_on50",
+#             name=f"graph_{tag}_off60_on40",
 #             overrides={
-#                 **ratio_overrides(100),
+#                 **ratio_overrides(120),
 #                 **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
 #                 **base_cost_graph_overrides(),
 #                 "feasibility": {"p_off": 0.8, "p_onl": p_onl},
@@ -204,6 +204,20 @@ SCENARIO_SWEEP.append(
 #             description="Graph feasibility test (online sparsity) at fixed coeffs/costs/load.",
 #         )
 #     )
+
+# ========= FAMILY 3A: GRAPH SPARSITY (mid only), fixed ratio (60/40) =========
+SCENARIO_SWEEP.append(
+    ScenarioConfig(
+        name="graph_mid_off60_on40",
+        overrides={
+            **ratio_overrides(120),
+            **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
+            **base_cost_graph_overrides(),
+            "feasibility": {"p_off": 0.8, "p_onl": 0.5},
+        },
+        description="Graph feasibility test (mid sparsity) at fixed coeffs/costs/load.",
+    )
+)
 
 # # ========= FAMILY 3B: GRAPH SPARSITY (only p_onl changes), purely online (0/100) =========
 # for tag, p_onl in [("dense", 0.8), ("sparse", 0.2)]:
@@ -233,7 +247,46 @@ SCENARIO_SWEEP.append(
 #     )
 # )
 
-# # ========= FAMILY 4: LOAD REGIME (b_mean changes), fixed ratio (50/50) =========
+# ========= FAMILY 3C: PURELY ONLINE (0/400), horizon stress test =========
+# Meant only for DL, SD, PD -> to see effect of learning on longer horizon
+_online_h400_base = ratio_overrides(0)
+_online_h400_base["problem"]["b_mean"] = 3360.0
+_online_h400_base["problem"]["b_std"] = 40.0
+SCENARIO_SWEEP.append(
+    ScenarioConfig(
+        name="online_h400_off0_on400",
+        overrides={
+            **_online_h400_base,
+            **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
+            **base_cost_graph_overrides(),
+            "stoch": {"horizon": 400},
+        },
+        description="Purely online horizon stress test: M_off=0, horizon=400, mid-variance baseline.",
+    )
+)
+
+# # ========= FAMILY 3D: FEASIBILITY SPARSITY w/ RESHUFFLING (20/80, 60/40) =========
+# for ratio_tag, M_off in [("off20_on80", 40), ("off60_on40", 120)]:
+#     base = ratio_overrides(M_off)
+#     base["problem"]["allow_reassignment"] = True
+#     for sparsity_tag, p_onl in [("dense", 0.8),("mid",0.5), ("sparse", 0.2)]:
+#         SCENARIO_SWEEP.append(
+#             ScenarioConfig(
+#                 name=f"graph_{sparsity_tag}_{ratio_tag}_reshuffle",
+#                 overrides={
+#                     **base,
+#                     **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
+#                     **base_cost_graph_overrides(),
+#                     "feasibility": {"p_off": 0.8, "p_onl": p_onl},
+#                 },
+#                 description=(
+#                     "Graph feasibility sparsity with reshuffling allowed "
+#                     f"({ratio_tag}, p_onl={p_onl})."
+#                 ),
+#             )
+#         )
+
+# #========= FAMILY 4: LOAD REGIME (b_mean changes), fixed ratio (50/50) =========
 
 # for tag, cap_mean in [("underload", 1880.0), ("overload", 1360.0)]:
 #     base = ratio_overrides(100)
