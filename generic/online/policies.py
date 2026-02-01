@@ -128,7 +128,8 @@ class PrimalDualPolicy(BaseOnlinePolicy):
             instance,
             self._effective_caps,
         )
-        costs = self._price_aware_costs(costs, cap_matrix, n)
+        target = self._current_target(capacities)
+        costs = self._price_aware_costs(costs, cap_matrix, n, target)
         assigned_action = self._solve_price_aware_milp(
             cap_matrix,
             costs,
@@ -176,19 +177,25 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         self._lambda = eta0 * utilization
 
     # Apply optional cost scaling and add the price term to costs.
-    def _price_aware_costs(self, costs: np.ndarray, cap_matrix: np.ndarray, n: int) -> np.ndarray:
+    def _price_aware_costs(
+        self,
+        costs: np.ndarray,
+        cap_matrix: np.ndarray,
+        n: int,
+        target: np.ndarray,
+    ) -> np.ndarray:
         if self.cfg.primal_dual.normalize_costs:
             costs = costs / self._cost_scale
         if n:
-            price_terms = self._price_terms(cap_matrix)
+            price_terms = self._price_terms(cap_matrix, target)
             costs[0, :n] = costs[0, :n] + price_terms
         return costs
 
     # Compute lambda^T A_t^cap term (optionally normalized).
-    def _price_terms(self, cap_matrix: np.ndarray) -> np.ndarray:
+    def _price_terms(self, cap_matrix: np.ndarray, target: np.ndarray) -> np.ndarray:
         cap = np.asarray(cap_matrix, dtype=float)
         if self.cfg.primal_dual.normalize_update:
-            denom = np.where(self._cap_per_step > 0.0, self._cap_per_step, 1.0)
+            denom = np.where(target > 1.0, target, 1.0)
             scaled = cap / denom.reshape(-1, 1)
             return scaled.T @ self._lambda
         return cap.T @ self._lambda
@@ -233,17 +240,20 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         usage = np.zeros_like(self._lambda)
         if 0 <= assigned_action < n:
             usage = cap_matrix[:, assigned_action]
-        target = self._cap_per_step
-        if self.cfg.primal_dual.use_remaining_capacity_target:
-            steps_left = max(1, self._total_steps - self._t)
-            target = remaining_caps.reshape(-1) / float(steps_left)
+        target = self._current_target(remaining_caps)
         if self.cfg.primal_dual.normalize_update:
-            denom = np.where(target > 0.0, target, 1.0)
+            denom = np.where(target > 1.0, target, 1.0)
             delta = (usage - target) / denom
         else:
             delta = usage - target
         self._lambda = np.maximum(self._lambda + eta_t * delta, 0.0)
         self._t += 1
+
+    def _current_target(self, remaining_caps: np.ndarray) -> np.ndarray:
+        if self.cfg.primal_dual.use_remaining_capacity_target:
+            steps_left = max(1, self._total_steps - self._t)
+            return remaining_caps.reshape(-1) / float(steps_left)
+        return self._cap_per_step
 
     # Step-size schedule for the dual update.
     def _eta_t(self) -> float:

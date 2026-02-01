@@ -172,6 +172,37 @@ def _build_feas_constraints(
     return np.vstack(rows), np.asarray(rhs, dtype=float)
 
 
+
+
+def _bin_probs_exp(n: int, p_min: float, p_max: float, alpha: float) -> np.ndarray:
+    if n <= 1:
+        return np.asarray([p_max], dtype=float)
+    t = np.linspace(0.0, 1.0, n)
+    probs = p_min + (p_max - p_min) * np.exp(-alpha * t)
+    return np.clip(probs, 0.0, 1.0)
+
+
+def _sample_feas_mask_by_bin(cfg: Config, rng: np.random.Generator, M: int, n: int, *, phase: str) -> np.ndarray:
+    mode = getattr(cfg.feasibility, "mode", "uniform")
+    if mode == "uniform":
+        p = cfg.feasibility.p_off if phase == "offline" else cfg.feasibility.p_onl
+        probs = np.full((n,), float(p), dtype=float)
+    elif mode == "exp_bin":
+        if phase == "offline":
+            params = getattr(cfg.feasibility, "exp_bin_offline", None) or {}
+        else:
+            params = getattr(cfg.feasibility, "exp_bin_online", None) or {}
+        p_min = float(params.get("p_min", 0.05))
+        p_max = float(params.get("p_max", 0.8))
+        alpha = float(params.get("alpha", 2.0))
+        probs = _bin_probs_exp(n, p_min, p_max, alpha)
+    else:
+        raise ValueError(f"Unknown feasibility mode '{mode}'.")
+
+    # Broadcast per-bin probabilities to items.
+    return (rng.uniform(size=(M, n)) < probs).astype(int)
+
+
 def generate_offline_instance(cfg: Config, seed: int) -> Instance:
     """
     Convenience wrapper for an offline-only instance (M_onl = 0).
@@ -187,7 +218,7 @@ def _generate_online_phase(
     d: int,
     M_off: int,
 ) -> tuple[List[OnlineItem], np.ndarray]:
-    base_mask_onl = (rng_onl.uniform(size=(M_onl, n)) < cfg.feasibility.p_onl).astype(int)
+    base_mask_onl = _sample_feas_mask_by_bin(cfg, rng_onl, M_onl, n, phase="online")
     _ensure_row_feasible(base_mask_onl, rng_onl)
 
     fallback_idx = n if cfg.problem.fallback_is_enabled else -1
@@ -251,7 +282,7 @@ def generate_instance_with_online(
     cap_vectors_off = _sample_cap_vectors(cfg, rng, M_off, beta_params=beta_params, bounds=bounds)
     # Feasibility mask for OFFLINE items (regular actions only).
     p_off = cfg.feasibility.p_off
-    feas_mask = (rng.uniform(size=(M_off, n)) < p_off).astype(int)
+    feas_mask = _sample_feas_mask_by_bin(cfg, rng, M_off, n, phase="offline")
     _ensure_row_feasible(feas_mask, rng)
     fallback_idx = n if cfg.problem.fallback_is_enabled else -1
     cols = n + (1 if fallback_idx >= 0 else 0)

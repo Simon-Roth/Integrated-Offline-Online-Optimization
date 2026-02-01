@@ -1,7 +1,3 @@
-problem:
-  allow_reassignment: false # if false, online heuristics won't reshuffle offline items
-  fallback_allowed_online: false # allow online fallback to keep pricing LP feasible
-
 util_pricing:
   update_rule: "exponential"  # "polynomial" | "exponential"
   price_exponent: 2.0        # used when update_rule == "polynomial"

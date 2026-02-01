@@ -103,6 +103,14 @@ def _build_run_summary(
     final_fallback: int,
     instance: Any,
     offline_util_per_bin: List[float] | None = None,
+    *,
+    offline_unplaced: int = 0,
+    online_unplaced: int = 0,
+    offline_fail_penalty: float = 0.0,
+    online_fail_penalty: float = 0.0,
+    offline_objective_penalized: float | None = None,
+    online_objective_penalized: float | None = None,
+    total_objective_penalized: float | None = None,
 ) -> Dict[str, Any]:
     summary = {
         "seed": seed,
@@ -117,6 +125,9 @@ def _build_run_summary(
             "objective": float(offline_info.obj_value),
             "runtime": float(offline_info.runtime),
             "fallback_items": int(offline_fallback),
+            "unplaced_items": int(offline_unplaced),
+            "failure_penalty": float(offline_fail_penalty),
+            "objective_penalized": offline_objective_penalized,
         },
         "online": {
             "status": online_info.status,
@@ -124,8 +135,12 @@ def _build_run_summary(
             "runtime": float(online_info.runtime),
             "fallback_items": int(online_info.fallback_items),
             "evicted_offline": int(online_info.evicted_offline),
+            "unplaced_items": int(online_unplaced),
+            "failure_penalty": float(online_fail_penalty),
+            "objective_penalized": online_objective_penalized,
         },
         "final_items_in_fallback": int(final_fallback),
+        "total_objective_penalized": total_objective_penalized,
         "slack": {
             "enforce_slack": bool(cfg.slack.enforce_slack),
             "fraction": float(cfg.slack.fraction),
@@ -150,6 +165,11 @@ def run_eval(
     runs: List[Dict[str, Any]] = []
     offline_util_means: List[float] = []
     track_offline_util = bool(getattr(cfg.eval, "track_offline_util_for_binpacking", False))
+    offline_fail_statuses = {"INFEASIBLE", "INF_OR_UNBD", "UNBOUNDED"}
+    online_fail_statuses = {"INFEASIBLE"}
+
+
+
 
     for seed in seeds:
         set_global_seed(seed)
@@ -197,8 +217,7 @@ def run_eval(
         if policy_path and online_policy_needs_prices(policy_path):
             if policy_path == ONLINE_SIM_DUAL:
                 from generic.online.generic_pricing import compute_prices
-            else:
-                from binpacking.online.prices import compute_prices
+            
 
             price_path_str = online_policy_price_path(policy_path)
             if price_path_str is None:
@@ -238,6 +257,29 @@ def run_eval(
         online_solver = OnlineSolver(cfg, online_policy)
         final_state, online_info = online_solver.run(instance, offline_state)
 
+        penalty_per_item = float(getattr(cfg.costs, "fail_penalty_per_item", 0.0))
+        penalty_scale = float(getattr(cfg.costs, "fail_penalty_scale", 1.0))
+        penalty_per_item *= penalty_scale
+
+        offline_unplaced = 0
+        online_unplaced = 0
+        offline_fail_penalty = 0.0
+        online_fail_penalty = 0.0
+        if penalty_per_item > 0:
+            if offline_info.status in offline_fail_statuses:
+                offline_unplaced = max(0, len(instance.offline_items) - len(offline_state.assigned_action))
+                offline_fail_penalty = penalty_per_item * offline_unplaced
+            if online_info.status in online_fail_statuses:
+                online_unplaced = max(0, len(instance.online_items) - len(online_info.decisions))
+                online_fail_penalty = penalty_per_item * online_unplaced
+
+        offline_obj_base = float(offline_info.obj_value)
+        if not np.isfinite(offline_obj_base):
+            offline_obj_base = 0.0
+        offline_obj_pen = offline_obj_base + offline_fail_penalty
+        online_obj_pen = float(online_info.total_objective) + online_fail_penalty
+        total_obj_pen = offline_obj_pen + online_obj_pen
+
         offline_fallback = state_utils.count_fallback_items(offline_state, instance)
         final_fallback = state_utils.count_fallback_items(final_state, instance)
 
@@ -251,6 +293,13 @@ def run_eval(
                 final_fallback,
                 instance,
                 per_bin_util,
+                offline_unplaced=offline_unplaced,
+                online_unplaced=online_unplaced,
+                offline_fail_penalty=offline_fail_penalty,
+                online_fail_penalty=online_fail_penalty,
+                offline_objective_penalized=offline_obj_pen,
+                online_objective_penalized=online_obj_pen,
+                total_objective_penalized=total_obj_pen,
             )
         )
 
@@ -258,8 +307,8 @@ def run_eval(
     offline_runtime = [run["offline"]["runtime"] for run in runs]
     online_obj = [run["online"]["objective"] for run in runs]
     online_runtime = [run["online"]["runtime"] for run in runs]
-    offline_fail_statuses = {"INFEASIBLE", "INF_OR_UNBD", "UNBOUNDED"}
-    online_fail_statuses = {"INFEASIBLE"}
+    total_obj_penalized_all = [run.get("total_objective_penalized") for run in runs]
+    total_obj_penalized_all = [v for v in total_obj_penalized_all if v is not None]
     completed_runs = [
         run
         for run in runs
@@ -292,6 +341,9 @@ def run_eval(
             "offline_objective": run["offline"]["objective"],
             "online_objective": run["online"]["objective"],
             "total_objective": run["offline"]["objective"] + run["online"]["objective"],
+            "offline_objective_penalized": run["offline"].get("objective_penalized"),
+            "online_objective_penalized": run["online"].get("objective_penalized"),
+            "total_objective_penalized": run.get("total_objective_penalized"),
             "offline_runtime": run["offline"]["runtime"],
             "online_runtime": run["online"]["runtime"],
             "offline_status": run["offline"]["status"],
@@ -307,9 +359,10 @@ def run_eval(
         "online_policy": online_policy_name,
         "offline_statuses": offline_statuses,
         "online_statuses": online_statuses,
-        "total_objective_mean": _mean_or_placeholder(completed_total_obj),
         "per_seed": per_seed,
         "aggregate": {
+            "total_objective_mean": _mean_or_placeholder(completed_total_obj),
+            "total_objective_penalized_mean": _mean_or_placeholder(total_obj_penalized_all),
             "offline_objective_mean": _mean_or_placeholder(completed_offline_obj),
             "offline_runtime_mean": _mean(offline_runtime),
             "online_objective_mean": _mean_or_placeholder(completed_online_obj),

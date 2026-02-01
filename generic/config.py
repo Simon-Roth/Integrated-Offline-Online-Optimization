@@ -1,6 +1,6 @@
 # generic/config.py
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple, Dict, List
 import yaml
 from pathlib import Path
@@ -50,11 +50,16 @@ class CapCoeffGenerationConfig:
 class FeasibilityGenerationConfig:
     """
     Feasibility sampling parameters (used to build A_t^{feas} rows).
-    - p_off: probability an action is feasible for an offline item
-    - p_onl: probability an action is feasible for an online item
+    - p_off: probability an action is feasible for an offline item (uniform mode)
+    - p_onl: probability an action is feasible for an online item (uniform mode)
+    - mode: 'uniform' | 'exp_bin'
+    - exp_bin_offline/online: per-bin exp decay params (p_min, p_max, alpha)
     """
     p_off: float = 0.7
     p_onl: float = 0.5
+    mode: str = "uniform"
+    exp_bin_offline: dict = field(default_factory=dict)
+    exp_bin_online: dict = field(default_factory=dict)
 
 @dataclass
 class CostConfig:
@@ -66,6 +71,8 @@ class CostConfig:
     - reassignment_penalty: base penalty for evicting an OFFLINE item (per default PER-ITEM)
     - penalty_mode: 'per_item' | 'per_usage'  (we default to per_item but can switch later)
     - per_usage_scale: if penalty_mode == 'per_usage', use penalty = per_usage_scale * ||A_t^{cap}||_1
+    - fail_penalty_per_item: penalty per unplaced item when a phase fails
+    - fail_penalty_scale: multiplier applied to fail_penalty_per_item
     """
     base_assign_range: Tuple[float, float] = (1.0, 5.0)
     assign_beta: Tuple[float, float] = (1.0, 1.0)
@@ -74,6 +81,8 @@ class CostConfig:
     reassignment_penalty: float = 10.0
     penalty_mode: str = "per_item"     # or "per_usage"
     per_usage_scale: float = 10.0     # used only if penalty_mode == "per_usage"
+    fail_penalty_per_item: float = 0.0
+    fail_penalty_scale: float = 1.0
 
 @dataclass
 class StochasticConfig:

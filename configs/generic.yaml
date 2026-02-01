@@ -7,7 +7,7 @@ problem:
   b_std: 20 # std for sampling b when b is empty
   fallback_is_enabled: true # optional rejection action with high cost
   fallback_allowed_offline: true # if true: offline items may choose rejection
-  fallback_allowed_online: false # if true: online items may choose rejection
+  fallback_allowed_online: true # if true: online items may choose rejection
   allow_reassignment: false # if false: online policies/heuristics must not evict/reshuffle offline items
 
 cap_coeffs:
@@ -17,27 +17,32 @@ cap_coeffs:
   online_bounds: [30, 180] # bounds for A_onl coefficients
 
 feasibility:
-  p_off: 0.8 # prob that an action is feasible for an offline item
+  mode: "uniform" # "uniform": constant per-bin feasibility; "exp_bin": exponential decay across bins (early bins easier)
+  # used only when mode == "uniform"
+  p_off: 0.5 # prob that an action is feasible for an offline item
   p_onl: 0.5 # prob that an action is feasible for an online item
+
+  # used only when mode == "exp_bin"
+  exp_bin_offline:
+    p_max: 0.6
+    p_min: 0.1
+    alpha: 3.0
+  exp_bin_online:
+    p_max: 0.6
+    p_min: 0.1
+    alpha: 3.0
 
 costs:
   assign_beta: [2.0, 5.0] # beta distribution for assignment costs
   assign_bounds: [1.0, 5.0] # lower/upper bounds for assignment costs
-  huge_fallback: 50.0 # fallback cost
+  huge_fallback: 7.5 # fallback cost
 
-  # Fallback is handled currently as the last option 
-  # Therefore, an item is tried to be placed and only if it doesnt fit anywhere, the fallback (rejection) is used 
-  # With the very high fallback costs, this matches the logic. However:
-  # That means, if we were to set fallback costs to 0 (free rejection), then instead of rejecting an item, which may be preferable, we still try to place it before rejecting
-  # The logic for that is currently handled in online_solver.py
-  # If we want to control fallback logic soley via the policies (and not unified like that via solver), the corresponding part has to be taken out of the solver and written in a new / adapted policy
-  # The reason we do this like that is for the specific bin packing problem this fits better and reduces redundant code
-  # However, minimal adaptions are needed to change that logic
-
-  reassignment_penalty: 10.0
+  reassignment_penalty: 7.0
   penalty_mode: "per_item"     # could integrate switch to 'per_usage'
   # or dependent on usage
   per_usage_scale: 10.0 # only active if penalty_mode is per_usage
+  fail_penalty_per_item: 7 # per unplaced item penalty when a phase fails | makes sense when fallback_allowed is False for at least one phase, bc. then it could fail (otherwise cant bc. fallback always feasible)
+  fail_penalty_scale: 1.0 # multiplier on fail_penalty_per_item
 
 stoch:
   horizon_dist: "fixed" # distribution of the numnber of online items M_onl (for later possible implementation)
@@ -77,13 +82,13 @@ sim_dual:
   sample_online_costs: false # if true, sample online costs; else use realized c_t
 
 primal_dual:
-  eta_mode: "constant"    # "constant" | "linear" | "sqrt" | "exponential"
-  eta0: 1e-05
+  eta_mode: "sqrt"    # "constant" | "linear" | "sqrt" | "exponential"
+  eta0: 0.05
   eta_decay: 0.0          # linear/exponential decay rate
   eta_min: 0.0            # floor for linear/exponential
-  normalize_update: false  # scale updates by relative capacity usage
+  normalize_update: true  # scale updates by relative capacity usage
   normalize_costs: false   # divide costs by a scale factor
-  use_remaining_capacity_target: true # target remaining capacity / remaining steps
+  use_remaining_capacity_target: false # target remaining capacity / remaining steps
   cost_scale_mode: "assign_mean" # "assign_mean" | "assign_bounds"
   cost_scale_min: 1e-8
 
