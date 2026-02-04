@@ -18,5 +18,6 @@ binpacking/results/**/*.json
 generic/results
 binpacking/data_analysis/**/param_sweep
 binpacking/data_analysis/**/param_sweep_feasoptions
+binpacking/data_analysis/**/param_sweep_only_dl
 binpacking/data_analysis/**/figures
 

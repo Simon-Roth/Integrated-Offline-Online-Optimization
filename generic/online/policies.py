@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, Optional
+from typing import Dict, List, Optional, Protocol, Sequence
 import json
+import math
 
+import gurobipy as gp
+from gurobipy import GRB
 import numpy as np
 
 from generic.config import Config
@@ -17,7 +20,13 @@ from generic.data.instance_generators import (
     _sample_cap_vectors,
 )
 from generic.data.offline_milp_assembly import build_offline_milp_data_from_arrays
-from generic.general_utils import effective_capacity, make_rng
+from generic.general_utils import (
+    action_is_feasible,
+    effective_capacity,
+    feasible_action_indices,
+    make_rng,
+    scalarize_vector,
+)
 from generic.models import AssignmentState, Instance, OnlineItem, Decision
 from generic.online.policy_utils import (
     current_cost_row,
@@ -58,13 +67,14 @@ class BaseOnlinePolicy(Protocol):
         ...
 
 
-# __all__ = [
-#     "BaseOnlinePolicy",
-#     "PolicyInfeasibleError",
-#     "PrimalDualPolicy",
-#     "SimDualPolicy",
-#     "RollingHorizonMILPPolicy",
-# ]
+__all__ = [
+    "BaseOnlinePolicy",
+    "PolicyInfeasibleError",
+    "GenericDynamicLearningPolicy",
+    "PrimalDualPolicy",
+    "SimDualPolicy",
+    "RollingHorizonMILPPolicy",
+]
 
 
 class PrimalDualPolicy(BaseOnlinePolicy):
@@ -574,3 +584,283 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
             future_mats.append(feas_matrix)
             future_rhs.append(feas_rhs)
         return current_mats + future_mats, current_rhs + future_rhs
+
+
+class GenericDynamicLearningPolicy(BaseOnlinePolicy):
+    """
+    Generic dynamic price-updating policy (no evictions).
+    """
+
+    def __init__(self, cfg: Config, price_path: Optional[Path] = None) -> None:
+        self.cfg = cfg
+        self.price_path = Path(price_path) if price_path else None
+
+        # Runtime state
+        self._phase_idx: int = -1
+        self._schedule: List[int] = []
+        self._current_prices: Optional[np.ndarray] = None  # length m
+        self._processed: int = 0  # number of arrivals already placed
+        self._seen_items: List[OnlineItem] = []
+        self._log_records: List[Dict[str, object]] = []
+        from generic.offline.offline_solver import OfflineMILPSolver
+
+        self._milp_solver = OfflineMILPSolver(cfg)
+
+    def select_action(
+        self,
+        item: OnlineItem,
+        state: AssignmentState,
+        instance: Instance,
+    ) -> Decision:
+        # Lazily build phase schedule on the first call.
+        if not self._schedule:
+            self._schedule = self._build_schedule(len(instance.online_items))
+
+        # Update prices if a phase boundary was reached after the last item.
+        self._maybe_update_prices(state, instance)
+
+        candidate_actions = self._candidate_actions(item, instance)
+        if not candidate_actions:
+            raise PolicyInfeasibleError(f"No feasible regular action for online item {item.id}")
+
+        # First, try to place without evictions via a one-item MILP (regular actions only).
+        milp_decision = self._milp_no_eviction(item, state, instance)
+        if milp_decision is not None:
+            self._mark_processed(item)
+            return milp_decision
+
+        # No feasible regular action (no evictions in generic policy).
+        raise PolicyInfeasibleError(
+            f"GenericDynamicLearningPolicy could not place item {item.id}"
+        )
+
+    # ------------------------------------------------------------------
+    # Pricing + scheduling
+    # ------------------------------------------------------------------
+    def _build_schedule(self, horizon: int) -> List[int]:
+        """Geometric schedule t_k = ε * M_onl * 2^k (rounded to ints)."""
+        eps = max(self.cfg.dla.epsilon, 1e-9)
+        min_len = max(1, int(self.cfg.dla.min_phase_len))
+        schedule: List[int] = []
+        base = math.ceil(eps * horizon)
+        t_k = max(min_len, base)
+        while t_k < horizon:
+            if schedule and t_k <= schedule[-1]:
+                t_k = schedule[-1] + min_len
+            schedule.append(min(t_k, horizon))
+            t_k = math.ceil(t_k * 2)
+        if schedule and schedule[-1] > horizon:
+            schedule[-1] = horizon
+        if not schedule or schedule[-1] < horizon:
+            schedule.append(horizon)
+        return schedule
+
+    def _maybe_update_prices(self, state: AssignmentState, instance: Instance) -> None:
+        """Update prices when we've completed a phase (after placing t_k items)."""
+        if self._processed == 0:
+            return
+        if self._phase_idx + 1 >= len(self._schedule):
+            return
+        next_boundary = self._schedule[self._phase_idx + 1]
+        if self._processed < next_boundary:
+            return
+
+        # Compute new prices using observed items up to t_k = next_boundary.
+        t_k = next_boundary
+        horizon = max(1, len(instance.online_items))
+        h_k = self.cfg.dla.epsilon * math.sqrt(horizon / float(t_k))
+        self._current_prices = self._compute_prices(instance, state, t_k, h_k)
+        self._phase_idx += 1
+        self._log_phase(t_k, h_k)
+
+    def _compute_prices(
+        self,
+        instance: Instance,
+        state: AssignmentState,
+        t_k: int,
+        h_k: float,
+    ) -> np.ndarray:
+        """
+        Solve fractional LP on observed items to get dual prices for capacities.
+        Returns a global lambda vector (length m).
+        """
+        observed: Sequence[OnlineItem] = self._seen_items[:t_k]
+        n = instance.n
+        m = instance.m
+        if m <= 0:
+            return np.zeros((0,), dtype=float)
+
+        model = gp.Model("dla_fractional_pricing")
+        model.Params.OutputFlag = 1 if self.cfg.dla.log_prices else 0
+
+        # Capacity scaling per phase, optionally respecting offline slack.
+        use_slack = self.cfg.dla.use_offline_slack and self.cfg.slack.enforce_slack
+        slack_fraction = self.cfg.slack.fraction if use_slack else 0.0
+        eff_total = effective_capacity(np.asarray(instance.b, dtype=float), use_slack, slack_fraction)
+
+        # Subtract fixed OFFLINE load (online load is modeled by LP vars).
+        offline_load = np.zeros((m,), dtype=float)
+        fallback_idx = instance.fallback_action_index
+        for item_id, action_id in state.assigned_action.items():
+            if item_id >= len(instance.offline_items):
+                continue
+            if action_id < 0 or action_id == fallback_idx:
+                continue
+            cap_mat = np.asarray(instance.offline_items[item_id].cap_matrix, dtype=float)
+            offline_load += cap_mat[:, action_id]
+
+        base_residual = np.maximum(0.0, eff_total - offline_load)
+        horizon = float(len(instance.online_items))
+        scaled = (1.0 - h_k) * (t_k / horizon) * base_residual
+        residual = np.maximum(0.0, scaled)
+
+        x: Dict[tuple[int, int], gp.Var] = {}
+        y_fallback: Dict[int, gp.Var] = {}
+        cap_by_id = {item.id: np.asarray(item.cap_matrix, dtype=float) for item in observed}
+        for item in observed:
+            feasible_actions = feasible_action_indices(
+                item.feas_matrix,
+                item.feas_rhs,
+                action_ids=range(n),
+            )
+            for i in feasible_actions:
+                x[(item.id, i)] = model.addVar(
+                    lb=0.0, ub=1.0, name=f"x_{item.id}_{i}"
+                )
+            if action_is_feasible(item.feas_matrix, item.feas_rhs, fallback_idx):
+                y_fallback[item.id] = model.addVar(
+                    lb=0.0, ub=1.0, name=f"y_fallback_{item.id}"
+                )
+        model.update()
+
+        cap_constr: Dict[int, gp.Constr] = {}
+        for r in range(m):
+            expr = gp.quicksum(
+                cap_by_id[j][r, i] * var
+                for (j, i), var in x.items()
+            )
+            cap_constr[r] = model.addConstr(expr <= float(residual[r]), name=f"cap_{r}")
+
+        for item in observed:
+            item_vars = [var for (j, _), var in x.items() if j == item.id]
+            expr = gp.quicksum(item_vars)
+            if item.id in y_fallback:
+                expr += y_fallback[item.id]
+            model.addConstr(expr == 1.0, name=f"assign_{item.id}")
+
+        obj = gp.quicksum(instance.costs.assignment_costs[j, i] * var for (j, i), var in x.items())
+        if y_fallback:
+            fallback_cost = self.cfg.costs.huge_fallback
+            obj += gp.quicksum(fallback_cost * y for y in y_fallback.values())
+        model.setObjective(obj, GRB.MINIMIZE)
+
+        model.optimize()
+        if model.Status != GRB.OPTIMAL:
+            if self._current_prices is not None:
+                return self._current_prices
+            return np.zeros((m,), dtype=float)
+
+        lam = np.zeros((m,), dtype=float)
+        for r in range(m):
+            lam[r] = abs(float(cap_constr[r].Pi))
+        return lam
+
+    def _log_phase(self, t_k: int, h_k: float) -> None:
+        if not self.cfg.dla.log_prices or self.price_path is None:
+            return
+        prices = (
+            [float(x) for x in self._current_prices.tolist()]
+            if self._current_prices is not None
+            else []
+        )
+        record = {
+            "phase": int(self._phase_idx),
+            "t_k": int(t_k),
+            "h_k": float(h_k),
+            "prices": prices,
+        }
+        self._log_records.append(record)
+        self.price_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.price_path, "w") as f:
+            json.dump(
+                {
+                    "epsilon": float(self.cfg.dla.epsilon),
+                    "schedule": self._schedule,
+                    "records": self._log_records,
+                },
+                f,
+                indent=2,
+            )
+
+    def _mark_processed(self, item: OnlineItem) -> None:
+        self._seen_items.append(item)
+        self._processed += 1
+
+    # ------------------------------------------------------------------
+    # Placement helpers (reuse primal-dual structure)
+    # ------------------------------------------------------------------
+    def _milp_no_eviction(
+        self,
+        item: OnlineItem,
+        state: AssignmentState,
+        instance: Instance,
+    ) -> Optional[Decision]:
+        regular_actions = instance.n
+        if regular_actions <= 0:
+            return None
+        if not feasible_action_indices(
+            item.feas_matrix, item.feas_rhs, action_ids=range(regular_actions)
+        ):
+            return None
+
+        costs = np.array(
+            [[self._score(action_id, item, instance) for action_id in range(regular_actions)]],
+            dtype=float,
+        )
+        cap_matrix = np.asarray(item.cap_matrix, dtype=float)
+        capacities = remaining_capacities(self.cfg, state, instance)
+        feas_matrix = np.asarray(item.feas_matrix, dtype=float)[:, :regular_actions]
+        feas_rhs = np.asarray(item.feas_rhs, dtype=float)
+        data = build_offline_milp_data_from_arrays(
+            cap_matrices=cap_matrix.reshape(1, *cap_matrix.shape),
+            costs=costs,
+            feas_matrices=[feas_matrix],
+            feas_rhs=[feas_rhs],
+            b=capacities,
+            fallback_idx=-1,
+            slack_enforce=False,
+            slack_fraction=0.0,
+        )
+        rh_state, rh_info = self._milp_solver.solve_from_data(data)
+        if not rh_info.feasible:
+            return None
+        assigned_action = rh_state.assigned_action.get(0)
+        if assigned_action is None:
+            return None
+        incremental_cost = lookup_assignment_cost(self.cfg, instance, item.id, assigned_action)
+        return Decision(
+            placed_item=(item.id, int(assigned_action)),
+            evicted_offline=[],
+            reassignments=[],
+            incremental_cost=incremental_cost,
+        )
+
+    def _candidate_actions(
+        self,
+        item: OnlineItem,
+        instance: Instance,
+    ) -> List[int]:
+        regular_actions = instance.n
+        return feasible_action_indices(item.feas_matrix, item.feas_rhs, action_ids=range(regular_actions))
+
+    def _score(self, action_id: int, item: OnlineItem, instance: Instance) -> float:
+        c_ji = lookup_assignment_cost(self.cfg, instance, item.id, action_id)
+        cap_matrix = np.asarray(item.cap_matrix, dtype=float)
+        usage = cap_matrix[:, action_id]
+        lam = self._current_prices
+        if lam is None or lam.size == 0:
+            lam = np.zeros_like(usage)
+        if self.cfg.util_pricing.vector_prices:
+            return c_ji + float(np.dot(lam, usage))
+        lam_scalar = scalarize_vector(lam, "max")
+        return c_ji + lam_scalar * scalarize_vector(usage, self.cfg.heuristics.size_key)

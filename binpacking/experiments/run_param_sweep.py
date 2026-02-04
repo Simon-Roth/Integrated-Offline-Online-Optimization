@@ -75,6 +75,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip computing the full-horizon optimal benchmark.",
     )
+    parser.add_argument(
+        "--only-optimal",
+        action="store_true",
+        help="Run only the full-horizon optimal benchmark (skip eval pipelines).",
+    )
     return parser.parse_args()
 
 
@@ -101,6 +106,8 @@ def _scenario_problem_meta(cfg, M_onl_override: int | None) -> dict[str, Any]:
 
 def main() -> None:
     args = parse_args()
+    if args.only_optimal and args.skip_optimal:
+        raise ValueError("--only-optimal and --skip-optimal are mutually exclusive.")
     base_cfg = load_config(args.base_config)
 
     registry = default_registry()
@@ -134,6 +141,9 @@ def main() -> None:
             optimal_summary["problem"] = _scenario_problem_meta(scenario_cfg, args.M_onl)
             optimal_path = scenario_dir / f"optimal_full_horizon_{timestamp}.json"
             optimal_path.write_text(json.dumps(optimal_summary, indent=2))
+
+        if args.only_optimal:
+            continue
 
         for spec in pipeline_specs:
             offline_solver_cls = _import_symbol(spec.offline_solver)

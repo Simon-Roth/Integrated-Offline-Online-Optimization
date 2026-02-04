@@ -79,6 +79,9 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
         else:
             price_cache = np.zeros(regular_actions)
 
+        # We use this solver (from generic) bc. it allows us to reuse functionality for convenience and consistency
+        # However it is equivalent to just a sequential assingment minimizing cost + price
+        
         solver = OfflineMILPSolver(self.cfg, log_to_console=False)
         cols = regular_actions + (1 if fallback_idx >= 0 else 0)
 
