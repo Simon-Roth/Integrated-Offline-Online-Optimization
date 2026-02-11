@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 
-from generic.config import Config
-from generic.general_utils import effective_capacity
-from generic.models import AssignmentState, Instance
+from generic.core.config import Config
+from generic.core.utils import effective_capacity
+from generic.core.models import AssignmentState, Instance
+
+
 class PolicyInfeasibleError(Exception):
-    """Raised when a policy cannot produce a feasible placement for the arriving item."""
+    """Raised when a policy cannot produce a feasible placement for the arriving step."""
 
     pass
 
@@ -14,17 +18,17 @@ class PolicyInfeasibleError(Exception):
 def current_cost_row(
     cfg: Config,
     instance: Instance,
-    item_id: int,
+    step_id: int,
     cols: int,
 ) -> np.ndarray:
-    """Return the assignment cost row for the current item."""
+    """Return the assignment cost row for the current step."""
     row = np.full((cols,), cfg.costs.huge_fallback, dtype=float)
     costs = instance.costs.assignment_costs
     if costs is None or not costs.size:
         return row
-    if item_id >= costs.shape[0]:
+    if step_id >= costs.shape[0]:
         return row
-    row[: min(cols, costs.shape[1])] = costs[item_id, : min(cols, costs.shape[1])]
+    row[: min(cols, costs.shape[1])] = costs[step_id, : min(cols, costs.shape[1])]
     return row
 
 
@@ -49,18 +53,18 @@ def remaining_capacities(
 def lookup_assignment_cost(
     cfg: Config,
     instance: Instance,
-    item_id: int,
-    action_id: int,
+    step_id: int,
+    option_id: int,
 ) -> float:
-    """Return the assignment cost for item->action (fallback uses huge_fallback)."""
+    """Return the assignment cost for step->option (fallback uses huge_fallback)."""
     costs = instance.costs.assignment_costs
     if (
         costs is not None
         and costs.size
-        and item_id < costs.shape[0]
-        and action_id < costs.shape[1]
+        and step_id < costs.shape[0]
+        and option_id < costs.shape[1]
     ):
-        return float(costs[item_id, action_id])
-    if action_id == instance.fallback_action_index:
+        return float(costs[step_id, option_id])
+    if option_id == instance.fallback_option_index:
         return float(cfg.costs.huge_fallback)
     return 0.0

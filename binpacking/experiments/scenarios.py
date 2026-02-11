@@ -4,7 +4,7 @@ import copy
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
-from generic.config import Config
+from generic.core.config import Config
 
 
 @dataclass(frozen=True)
@@ -103,9 +103,9 @@ RATIO_SWEEP = [
 ]
 
 
-def ratio_overrides(M_off: int) -> Dict[str, Any]:
-    M_onl = TOTAL_ITEMS - M_off
-    return {"problem": {"M_off": M_off}, "stoch": {"horizon": M_onl}}
+def ratio_overrides(T_off: int) -> Dict[str, Any]:
+    T_onl = TOTAL_ITEMS - T_off
+    return {"problem": {"T_off": T_off}, "stoch": {"T_onl": T_onl}}
 
 
 def base_cost_graph_overrides() -> Dict[str, Any]:
@@ -189,11 +189,11 @@ SCENARIO_SWEEP: List[ScenarioConfig] = []
 
 
 # ========= FAMILY 1: BASELINE (mid variance), ratio sweep =========
-for suffix, M_off in RATIO_SWEEP:
+for suffix, T_off in RATIO_SWEEP:
     add_scenario_with_feas_variants(
         name=f"baseline_midvar_{suffix}",
         overrides={
-            **ratio_overrides(M_off),
+            **ratio_overrides(T_off),
             **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
             **base_cost_graph_overrides(),
         },
@@ -289,14 +289,14 @@ add_scenario_with_feas_variants(
         **_online_h400_base,
         **volume_overrides(VOL_MID_VAR, DEFAULT_BOUNDS),
         **base_cost_graph_overrides(),
-        "stoch": {"horizon": 400},
+        "stoch": {"T_onl": 400},
     },
-    description="Purely online horizon stress test: M_off=0, horizon=400, mid-variance baseline.",
+    description="Purely online horizon stress test: T_off=0, T_onl=400, mid-variance baseline.",
 )
 
 # ========= FAMILY 3D: FEASIBILITY SPARSITY w/ RESHUFFLING (20/80, 60/40) =========
-for ratio_tag, M_off in [("off20_on80", 40), ("off60_on40", 120)]:
-    base = ratio_overrides(M_off)
+for ratio_tag, T_off in [("off20_on80", 40), ("off60_on40", 120)]:
+    base = ratio_overrides(T_off)
     base["problem"]["allow_reassignment"] = True
     base["problem"]["fallback_allowed_online"] = False
     for sparsity_tag, p_onl in [("dense", 0.8), ("mid", 0.5), ("sparse", 0.2)]:

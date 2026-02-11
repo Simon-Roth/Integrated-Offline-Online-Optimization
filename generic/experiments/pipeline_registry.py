@@ -3,18 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List
 
-OFFLINE_MILP_GENERIC = "generic.offline.offline_solver.OfflineMILPSolver"
-OFFLINE_MILP_BINPACKING = "binpacking.offline.offline_solver.OfflineMILPSolver"
-OFFLINE_CABFD = "binpacking.offline.offline_heuristics.cost_best_fit_decreasing.CostAwareBestFitDecreasing"
-OFFLINE_UTILIZATION = "binpacking.offline.offline_heuristics.utilization_priced.UtilizationPricedDecreasing"
+# Offline
+OFFLINE_MILP_GENERIC = "generic.offline.solver.OfflineMILPSolver"
+OFFLINE_MILP_BINPACKING = "binpacking.offline.solver.OfflineMILPSolver"
+OFFLINE_CABFD = "binpacking.offline.policies.cost_best_fit_decreasing.CostAwareBestFitDecreasing"
+OFFLINE_UTILIZATION = "binpacking.offline.policies.utilization_priced.UtilizationPricedDecreasing"
 
+# Online
 ONLINE_ROLLING_MILP = "generic.online.policies.RollingHorizonMILPPolicy"
-ONLINE_CABF = "binpacking.online.online_heuristics.cost_best_fit.CostAwareBestFitOnlinePolicy"
-ONLINE_SIM_BASE = "binpacking.online.online_heuristics.sim_base.SimBasePolicy"
+ONLINE_CABF = "binpacking.online.policies.cost_best_fit.CostAwareBestFitOnlinePolicy"
+ONLINE_SIM_BASE = "binpacking.online.policies.sim_base.SimBasePolicy"
 ONLINE_SIM_DUAL = "generic.online.policies.SimDualPolicy"
-ONLINE_DYNAMIC_LEARNING = "binpacking.online.online_heuristics.dynamic_learning.DynamicLearningPolicy"
+ONLINE_DYNAMIC_LEARNING = "binpacking.online.policies.dynamic_learning.DynamicLearningPolicy"
 ONLINE_PRIMAL_DUAL = "generic.online.policies.PrimalDualPolicy"
-ONLINE_POLICIES_NEED_PRICES = {ONLINE_SIM_BASE, ONLINE_SIM_DUAL} # use generic pricing module generic_pricing.py or bin packing specific pricing logic
+# SimBase not tested (-> legacy / replaced by SimDual)
+ONLINE_POLICIES_NEED_PRICES = {ONLINE_SIM_BASE, ONLINE_SIM_DUAL}  # use generic/online/pricing.py
 
 
 def online_policy_needs_prices(policy_path: str) -> bool:
@@ -23,9 +26,9 @@ def online_policy_needs_prices(policy_path: str) -> bool:
 
 def online_policy_price_path(policy_path: str) -> str | None:
     if policy_path == ONLINE_SIM_BASE:
-        return "binpacking/results/sim_base.json"
+        return "outputs/binpacking/results/sim_base.json"
     if policy_path == ONLINE_SIM_DUAL:
-        return "generic/results/sim_dual.json"
+        return "outputs/generic/results/sim_dual.json"
     return None
 
 

@@ -6,9 +6,9 @@ from typing import List, Sequence, Tuple
 
 import numpy as np
 
-from generic.config import Config
-from generic.models import Instance
-from generic.general_utils import effective_capacity
+from generic.core.config import Config
+from generic.core.models import Instance
+from generic.core.utils import effective_capacity
 
 
 @dataclass(frozen=True)
@@ -47,8 +47,8 @@ def build_offline_milp_data_from_arrays(
 ) -> OfflineMILPData:
     """
     Build offline MILP data from raw arrays. Independent of instance generation.
-    cap_matrices: array of shape (M, m, n) with A_t^{cap} per item.
-    feas_matrices: list of A_t^{feas} matrices (shape p_t x n' (n' is n or n+1 dependent on fallback | pt is num of local feas constraints for item t))
+    cap_matrices: array of shape (M, m, n) with A_t^{cap} per step.
+    feas_matrices: list of A_t^{feas} matrices (shape p_t x n' (n' is n or n+1 dependent on fallback | pt is num of local feas constraints for step t))
     feas_rhs: list of b_t vectors (shape p_t,)
     """
     cap = np.asarray(cap_matrices, dtype=float)
@@ -154,18 +154,18 @@ def build_offline_milp_data(
     """
     Convenience wrapper that assembles MILP data from an Instance + Config.
     """
-    if inst.offline_items:
-        cap_matrices = np.asarray([it.cap_matrix for it in inst.offline_items], dtype=float)
+    if inst.offline_steps:
+        cap_matrices = np.asarray([it.cap_matrix for it in inst.offline_steps], dtype=float)
     else:
         cap_matrices = np.empty((0, int(inst.m), int(inst.n)), dtype=float)
-    costs = np.asarray(inst.costs.assignment_costs[: len(inst.offline_items), :], dtype=float)
+    costs = np.asarray(inst.costs.assignment_costs[: len(inst.offline_steps), :], dtype=float)
     return build_offline_milp_data_from_arrays(
         cap_matrices=cap_matrices,
         costs=costs,
-        feas_matrices=[it.feas_matrix for it in inst.offline_items],
-        feas_rhs=[it.feas_rhs for it in inst.offline_items],
+        feas_matrices=[it.feas_matrix for it in inst.offline_steps],
+        feas_rhs=[it.feas_rhs for it in inst.offline_steps],
         b=inst.b,
-        fallback_idx=inst.fallback_action_index,
+        fallback_idx=inst.fallback_option_index,
         slack_enforce=cfg.slack.enforce_slack,
         slack_fraction=cfg.slack.fraction,
     )

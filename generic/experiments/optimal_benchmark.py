@@ -8,22 +8,22 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 
-from generic.config import Config, load_config
-from generic.data.instance_generators import generate_instance_with_online
+from generic.core.config import Config, load_config
+from generic.data.instance_generators import BaseInstanceGenerator
 from generic.data.offline_milp_assembly import build_offline_milp_data
-from generic.general_utils import set_global_seed
-from generic.models import Costs, Instance, ItemSpec
-from generic.offline.offline_solver import OfflineMILPSolver
+from generic.core.utils import set_global_seed
+from generic.core.models import Costs, Instance, StepSpec
+from generic.offline.solver import OfflineMILPSolver
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Solve the full-horizon (offline+online) MILP and write an aggregated JSON summary."
     )
-    parser.add_argument("--config", default="configs/generic.yaml", help="Path to generic YAML.")
+    parser.add_argument("--config", default="configs/generic/generic.yaml", help="Path to generic YAML.")
     parser.add_argument(
         "--output-dir",
-        default="generic/results",
+        default="outputs/generic/results",
         help="Directory for aggregated JSON output.",
     )
     parser.add_argument(
@@ -40,10 +40,10 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--m-onl",
-        dest="M_onl",
+        dest="T_onl",
         type=int,
         default=None,
-        help="Optional override for the number of online items.",
+        help="Optional override for the number of online steps.",
     )
     return parser.parse_args()
 
@@ -60,17 +60,17 @@ def _build_full_horizon_instance(instance: Instance) -> Instance:
     Convert an offline+online instance into a single offline instance so the MILP
     solves the full-horizon optimum.
     """
-    offline_specs = list(instance.offline_items)
+    offline_specs = list(instance.offline_steps)
     online_specs = [
-        ItemSpec(
-            id=item.id,
-            cap_matrix=item.cap_matrix,
-            feas_matrix=item.feas_matrix,
-            feas_rhs=item.feas_rhs,
+        StepSpec(
+            step_id=step.step_id,
+            cap_matrix=step.cap_matrix,
+            feas_matrix=step.feas_matrix,
+            feas_rhs=step.feas_rhs,
         )
-        for item in instance.online_items
+        for step in instance.online_steps
     ]
-    all_items = offline_specs + online_specs
+    all_steps = offline_specs + online_specs
 
     costs = Costs(
         assignment_costs=instance.costs.assignment_costs.copy(),
@@ -84,10 +84,10 @@ def _build_full_horizon_instance(instance: Instance) -> Instance:
         n=instance.n,
         m=instance.m,
         b=instance.b.copy(),
-        offline_items=all_items,
+        offline_steps=all_steps,
         costs=costs,
-        fallback_action_index=instance.fallback_action_index,
-        online_items=[],
+        fallback_option_index=instance.fallback_option_index,
+        online_steps=[],
     )
 
 
@@ -95,16 +95,17 @@ def run_optimal_benchmark(
     cfg: Config,
     *,
     seeds: List[int],
-    M_onl: Optional[int],
+    T_onl: Optional[int],
 ) -> Dict[str, Any]:
     objectives: List[float] = []
     runtimes: List[float] = []
     offline_statuses: Dict[str, int] = {}
     per_seed: List[Dict[str, Any]] = []
+    generator = BaseInstanceGenerator.from_config(cfg)
 
     for seed in seeds:
         set_global_seed(seed)
-        instance = generate_instance_with_online(cfg, seed=seed, M_onl=M_onl)
+        instance = generator.generate_full_instance(cfg, seed=seed, T_onl=T_onl)
         full_instance = _build_full_horizon_instance(instance)
 
         offline_solver = OfflineMILPSolver(cfg)
@@ -131,7 +132,7 @@ def run_optimal_benchmark(
 
     summary = {
         "seed_count": len(seeds),
-        "offline_solver": "generic.offline.offline_solver.OfflineMILPSolver",
+        "offline_solver": "generic.offline.solver.OfflineMILPSolver",
         "offline_statuses": offline_statuses,
         "per_seed": per_seed,
         "aggregate": {
@@ -151,7 +152,7 @@ def main() -> None:
     summary = run_optimal_benchmark(
         cfg,
         seeds=seeds,
-        M_onl=args.M_onl,
+        T_onl=args.T_onl,
     )
 
     output_dir = Path(args.output_dir)

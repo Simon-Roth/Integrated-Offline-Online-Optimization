@@ -2,8 +2,8 @@
 
 This repository implements a two-stage allocation framework:
 
-1) Offline phase: assign a known set of items to actions by solving a MILP or using heuristics.
-2) Online phase: assign arriving items sequentially using online policies that can optionally evict or reassign offline items (binpacking is a specialization).
+1) Offline phase: assign a known set of offline steps to options (one-hot actions) by solving a MILP or using heuristics.
+2) Online phase: assign arriving steps sequentially using online policies that can optionally evict or reassign offline steps (binpacking is a specialization).
 
 The system is designed to be generic (A x <= b MILP interface) and also provide binpacking-specific heuristics, policies, and experiments.
 
@@ -17,12 +17,18 @@ The documentation below is organized by module and describes:
 ## Repository layout
 
 - `generic/`
-  Core, problem-agnostic framework: config, data generation, MILP assembly,
-  generic offline/online solvers, experiment runners, and shared models.
+  Core, problem-agnostic framework:
+  `core/` (config, models, utils), `data/`, `offline/`, `online/`, `experiments/`.
 - `binpacking/`
-  Binpacking-specific heuristics, online policies, pricing, experiments, and analysis.
+  Binpacking-specific heuristics, online policies, pricing, and experiments.
 - `configs/`
   Base YAML configs used by generic and binpacking workflows.
+- `analysis/`
+  Analysis notebooks and scripts.
+- `scripts/`
+  Thin CLI entrypoints that call the experiment modules.
+- `outputs/`
+  Generated artifacts (results, plots, analysis outputs). Ignored by git.
 - `requirements.txt`
   Python dependencies (NumPy, Gurobi, etc).
 - `README.md`
@@ -35,23 +41,24 @@ The documentation below is organized by module and describes:
 The typical flow for a single experiment run is:
 
 1) Load config (generic or binpacking override).
-2) Generate an instance (offline items, online items, local feasibility constraints, costs) from the config.
+2) Generate an instance (offline steps, online steps, local feasibility constraints, costs) from the config.
 3) Assemble offline MILP data (A, b, c) from the instance.
 4) Solve the offline problem (MILP or heuristic).
-5) Run the online policy sequentially on online items.
+5) Run the online policy sequentially on online steps.
 6) Aggregate results and write a JSON summary.
 
 This flow is implemented in `generic/experiments/run_eval.py`, and is repeated
 for multiple pipelines and seeds in `generic/experiments/run_multiple_evals.py` and `binpacking/experiments/run_param_sweep.py`.
+CLI wrappers live in `scripts/` (e.g., `scripts/run_eval.py`).
 
 ---
 
 ## Configuration
 
-### `generic/config.py`
+### `generic/core/config.py`
 Defines all configuration dataclasses and YAML parsing.
 
-- `ProblemConfig`: n actions, M_off items, m capacity constraints, b (or b_mean/b_std), fallback flags, allow_reassignment.
+- `ProblemConfig`: n options, T_off steps, m capacity constraints, b (or b_mean/b_std), fallback flags, allow_reassignment.
 - `CapCoeffGenerationConfig`: Beta distribution and bounds for offline/online
   A_t^{cap} coefficients.
 - `FeasibilityGenerationConfig`: feasibility edge probabilities.
@@ -63,44 +70,42 @@ Defines all configuration dataclasses and YAML parsing.
 - `HeuristicConfig`: scalarization for vector sizes and residuals.
 - `EvalConfig`: list of seeds.
 
-### `configs/generic.yaml`
+### `configs/generic/generic.yaml`
 Default configuration for the generic framework.
 
 Key flags:
-- `fallback_is_enabled`: whether a fallback action exists.
-- `fallback_allowed_offline`: whether offline items may use fallback.
-- `fallback_allowed_online`: whether online items may use fallback.
+- `fallback_is_enabled`: whether a fallback option exists.
+- `fallback_allowed_offline`: whether offline steps may use fallback.
+- `fallback_allowed_online`: whether online steps may use fallback.
 - `allow_reassignment`: if false, online evictions/reassignments are disallowed.
 
-### `configs/binpacking.yaml` + `binpacking/config.py`
-`binpacking/config.py` merges `configs/generic.yaml` with binpacking overrides,
+### `configs/binpacking/binpacking.yaml` + `binpacking/core/config.py`
+`binpacking/core/config.py` merges `configs/generic/generic.yaml` with binpacking overrides,
 so binpacking experiments can change only what is needed.
+Defaults in `generic/core/config.py` mirror `configs/generic/generic.yaml`.
 
 ---
 
 ## Core data structures
 
-### `generic/models.py`
+### `generic/core/models.py`
 Defines the core types that all phases share.
 
-- `ItemSpec`: id, A_t^{cap}, and local feasibility (A_t^{feas}, b_t).
-- `OnlineItem`: arriving online item, with A_t^{cap} and local feasibility (A_t^{feas}, b_t).
+- `StepSpec`: id, A_t^{cap}, and local feasibility (A_t^{feas}, b_t); used for both offline and online steps.
 - `Costs`: assignment costs matrix, fallback cost, eviction penalty settings.
 - `Instance`: the full problem instance:
   - n, m, b
-  - offline_items
+  - offline_steps
   - costs
-  - fallback_action_index
-  - online_items (optional)
+  - fallback_option_index
+  - online_steps (optional)
 - `AssignmentState`: mutable state of loads and assignments.
-- `Decision`: what a policy decided for one online item (placement, evictions,
+- `Decision`: what a policy decided for one online step (placement, evictions,
   reassignments, incremental objective).
 
-### `generic/offline/models.py`
+### Solution summaries (`generic/core/models.py`)
 - `OfflineSolutionInfo`: algorithm name, status, objective, runtime, feasible.
 - `_status_name`: maps Gurobi status codes to strings.
-
-### `generic/online/models.py`
 - `OnlineSolutionInfo`: status, runtime, total objective, fallback count,
   eviction count, and optional decisions log.
 
@@ -112,18 +117,18 @@ Defines the core types that all phases share.
 Responsible for sampling A_t^{cap}, local feasibility (A_t^{feas}, b_t), and costs from the config.
 
 Key functions:
-- `generate_instance_with_online(cfg, seed, M_onl=...)`:
+- `BaseInstanceGenerator.from_config(cfg).generate_full_instance(cfg, seed, T_onl=...)`:
   - samples capacity vector b (or uses provided list),
   - samples offline A_t^{cap} coefficients,
-  - samples offline feasible actions with probability `p_off` and encodes them as
-    explicit local constraints A_t^{feas} x_t = b_t (one-hot + forbidden actions),
+  - samples offline feasible options with probability `p_off` and encodes them as
+    explicit local constraints A_t^{feas} x_t = b_t (one-hot + forbidden options),
   - samples offline assignment costs,
-  - samples online A_t^{cap} coefficients and feasible actions with probability `p_onl`,
+  - samples online A_t^{cap} coefficients and feasible options with probability `p_onl`,
     then builds A_t^{feas} x_t = b_t and calls `_ensure_row_feasible` to guarantee at least
-    one feasible regular action,
+    one feasible regular option,
   - appends online costs to the cost matrix.
-- `generate_offline_instance(cfg, seed)`:
-  - wrapper that calls `generate_instance_with_online` with `M_onl=0`.
+- `BaseInstanceGenerator.generate_offline_instance(cfg, seed)`:
+  - wrapper that calls `generate_full_instance` with `T_onl=0`.
 
 This file is the source of truth for how local feasibility is generated:
 - Offline feasibility uses `cfg.feasibility.p_off` and is encoded in A_t^{feas}, b_t.
@@ -132,24 +137,25 @@ This file is the source of truth for how local feasibility is generated:
   `fallback_allowed_offline` and `fallback_allowed_online` via A_t^{feas} rows.
 
 ### Binpacking vs. generic problems
-Binpacking is encoded in the instance generation and block utilities, not in the
-experiment runner. In particular:
+Binpacking is encoded in the instance generator choice and block utilities, not in
+the experiment runner. In particular:
 
-- `generic/data/instance_generators.py` enforces the block structure
-  (`m = n * d`) and builds A_t^{cap} with `_build_block_cap_matrix`.
-- `binpacking/block_utils.py` provides binpacking-specific helpers such as
+- `generation.generator: "generic"` uses `GenericInstanceGenerator` and samples
+  full `m x n` capacity matrices.
+- `generation.generator: "binpacking"` uses `BinpackingInstanceGenerator` and
+  enforces the block structure (`m = n * d`).
+- `binpacking/core/block_utils.py` provides binpacking-specific helpers such as
   `extract_volume` and `split_capacities`.
-- `binpacking/online/online_heuristics/*` are heuristics that assume the block structure.
+- `binpacking/online/policies/*` are heuristics that assume the block structure.
 
 `binpacking/experiments/run_param_sweep.py` only orchestrates scenarios and pipelines;
 it does not define the problem structure itself.
 
-To run a generic pipeline, use `generic/experiments/run_eval.py` with
-`configs/generic.yaml`. To run binpacking experiments, use
-`binpacking/experiments/run_param_sweep.py` and the merged config
-(`configs/generic.yaml` + `configs/binpacking.yaml` via `binpacking/config.py`).
-If you want a truly non-binpacking instance, you need an alternative generator
-that does not enforce the block structure.
+To run a generic pipeline, use `scripts/run_eval.py` (or `python -m generic.experiments.run_eval`)
+with `configs/generic/generic.yaml`. To run binpacking experiments, use
+`scripts/run_param_sweep.py` and the merged config
+(`configs/generic/generic.yaml` + `configs/binpacking/binpacking.yaml` via `binpacking/core/config.py`).
+For a generic (non-binpacking) instance, set `generation.generator: "generic"`.
 
 ### `generic/data/offline_milp_assembly.py`
 Builds the canonical MILP for the offline stage:
@@ -158,19 +164,22 @@ minimize c^T x subject to A x <= b.
 Key functions:
 - `build_offline_milp_data_from_arrays(...)`:
   - builds capacity constraints over m resources,
-  - does not add capacity constraints for the fallback action,
+  - does not add capacity constraints for the fallback option,
   - adds local feasibility constraints A_t^{feas} x_t = b_t (as two inequalities).
 - `build_offline_milp_data(instance, cfg)`:
   - convenience wrapper: pulls arrays from `Instance` and config.
 
 ### `generic/data/__init__.py` and `binpacking/data/instance_generators.py`
-These are re-exports to keep imports clean. Binpacking does not maintain its own generator logic.
+`generic/data/__init__.py` re-exports the generator base and `GenericInstanceGenerator`.
+`binpacking/data/instance_generators.py` exposes `BinpackingInstanceGenerator`.
+The old block-structured implementation lives in `binpacking/data/instance_generators_legacy.py`
+as a backup.
 
 ---
 
 ## Offline phase
 
-### `generic/offline/offline_solver.py`
+### `generic/offline/solver.py`
 Generic MILP solver that works directly on A, b, c.
 
 Flow:
@@ -183,15 +192,15 @@ Flow:
   - sets solver parameters,
   - solves and extracts an `AssignmentState` and `OfflineSolutionInfo`.
 
-### `binpacking/offline/offline_solver.py`
+### `binpacking/offline/solver.py`
 Extends the generic solver by adding warm-start heuristics from binpacking
 offline heuristics. The warm-start is optional and configured by
 `cfg.solver.warm_start_heuristic`.
 
-### `generic/offline/offline_policies.py`
+### `generic/offline/policies.py`
 Defines the interface for any offline heuristic (`solve(instance)`).
 
-### `binpacking/offline/offline_heuristics/*`
+### `binpacking/offline/policies/*`
 Binpacking-specific offline heuristics used for warm-starts and baselines:
 
 - `first_fit_decreasing.py` (FFD):
@@ -211,13 +220,13 @@ Binpacking-specific offline heuristics used for warm-starts and baselines:
 Defines the `BaseOnlinePolicy` interface (`select_action`), plus
 `PolicyInfeasibleError` for signaling infeasible placement.
 
-### `generic/online/online_solver.py`
+### `generic/online/solver.py`
 Orchestrates the online phase:
 
-- iterates through online items,
+- iterates through online steps,
 - calls `policy.select_action(...)` to get a `Decision`,
 - if policy raises `PolicyInfeasibleError`, the solver can place in fallback
-  if fallback is enabled and allowed for online items,
+  if fallback is enabled and allowed for online steps,
 - applies the decision to the live `AssignmentState`,
 - collects `OnlineSolutionInfo`.
 
@@ -227,19 +236,19 @@ Important behavior:
 - Fallback placement is controlled by:
   - `fallback_is_enabled`
   - `fallback_allowed_online`
-  - per-item A_t^{feas} rows that allow or forbid the fallback action.
+  - per-step A_t^{feas} rows that allow or forbid the fallback option.
 
 ### `generic/online/state_utils.py` (generic core)
 These are generic state mutation helpers used by the online solver:
 - `clone_state`, `build_cap_lookup`
 - `apply_decision`, `add_to_load`, `remove_from_load`
-- `count_fallback_items`
+- `count_fallback_steps`
 
 ### `binpacking/online/state_utils.py` (binpacking helpers)
 These are binpacking-specific simulation helpers used by online heuristics:
 - `PlacementContext`: a snapshot of loads and assignments for planning.
 - `build_context`: builds a context with effective capacities (slack-aware).
-- `execute_placement`: simulate placing an item into an action; can evict/reassign.
+- `execute_placement`: simulate placing an item into a bin; can evict/reassign.
 - `eviction_penalty`: compute eviction penalty (per item or per usage).
 - `effective_capacities`, `offline_volumes`, `TOLERANCE`.
 
@@ -251,32 +260,33 @@ this behavior in mind if new policies are added.
 
 ## Online policies (binpacking)
 
-Located in `binpacking/online/online_heuristics/`:
+Located in `binpacking/online/policies/`:
 
 
 - `cost_best_fit.py`:
   chooses bin with lowest incremental cost (cost aware), tie-break by residual (best fit), two-pass (-> no eviction then eviction).
 - `sim_base.py`:
-  uses precomputed dual prices (lambda) to score actions:
+  uses precomputed dual prices (lambda) to score options:
   cost + lambda * usage. Fallback is handled by the solver.
 - `dynamic_learning.py`:
   dynamic learning algorithm with phase schedule. Recomputes prices by solving
-  a fractional LP on observed items (scaled capacities).
+  a fractional LP on observed steps (scaled capacities).
 
 ---
 
 ## Pricing modules
 
-### `binpacking/online/prices.py`
-Computes dual prices for sim_base:
+### `generic/online/pricing.py`
+Computes dual prices for sim_base / sim_dual (generic and binpacking):
 
 - uses the realized offline state to compute residual capacities,
-- builds a fractional LP for a sampled set of online items (same horizon, new seed),
+- builds a fractional LP for a sampled set of online steps (same horizon, new seed),
 - supports separate switches for sampling online A/feasibility vs. online costs:
   - `cfg.sim_dual.sample_online_caps` controls resampling of A_t^{cap} and feasibility,
   - `cfg.sim_dual.sample_online_costs` controls whether online costs are resampled or taken from the realized instance,
-- allows fallback in the pricing LP (to guarantee successful computation) when a fallback action exists, penalized by `cfg.costs.huge_fallback`,
-- writes prices to `binpacking/results/sim_base.json`.
+- allows fallback in the pricing LP (to guarantee successful computation) when a fallback option exists, penalized by `cfg.costs.huge_fallback`,
+- writes prices to the policy-specific path from `generic/experiments/pipeline_registry.py`
+  (e.g. `outputs/binpacking/results/sim_base.json` or `outputs/generic/results/sim_dual.json`).
 
 This is called per seed inside `generic/experiments/run_eval.py` when the
 online policy requires prices.
@@ -306,14 +316,14 @@ Flow:
 - solve offline (MILP from A,b,c if solver supports `solve_from_data` (which is the case for our generic_solver, but e.g. nor for some binpacking-specific offline heuristics like UTIL as they do not work on A,b,c but Instance)),
 - compute prices if needed (sim_base),
 - run online solver,
-- aggregate results and write JSON to `generic/results`.
+- aggregate results and write JSON to `outputs/generic/results`.
 
 Key CLI args:
 ```
-python -m generic.experiments.run_eval \
-  --config configs/generic.yaml \
-  --offline-solver generic.offline.offline_solver.OfflineMILPSolver \
-  --online-policy binpacking.online.online_heuristics.cost_best_fit.CostAwareBestFitOnlinePolicy \
+python scripts/run_eval.py \
+  --config configs/generic/generic.yaml \
+  --offline-solver generic.offline.solver.OfflineMILPSolver \
+  --online-policy binpacking.online.policies.cost_best_fit.CostAwareBestFitOnlinePolicy \
   --seeds 1 2 3 \
   --m-onl 100
 ```
@@ -324,8 +334,8 @@ Optional: compute a full-horizon optimal benchmark once per seed.
 
 Key CLI args:
 ```
-python -m generic.experiments.run_multiple_evals \
-  --config configs/generic.yaml \
+python scripts/run_multiple_evals.py \
+  --config configs/generic/generic.yaml \
   --pipelines binpacking_milp+sim_base util+cost_best_fit \
   --seeds 1 2 3 \
   --m-onl 100 \
@@ -333,7 +343,7 @@ python -m generic.experiments.run_multiple_evals \
 ```
 
 ### `generic/experiments/optimal_benchmark.py`
-Builds a full-horizon MILP by merging offline and online items, then solves it
+Builds a full-horizon MILP by merging offline and online steps, then solves it
 offline. This gives a lower bound or benchmark for evaluation.
 
 ---
@@ -342,19 +352,19 @@ offline. This gives a lower bound or benchmark for evaluation.
 
 ### `binpacking/experiments/scenarios.py`
 Defines scenario families for parameter sweeps:
-- ratio sweeps (M_off vs M_onl),
+- ratio sweeps (T_off vs T_onl),
 - coefficient variance families,
 - graph sparsity variations,
 - load regimes and other controls.
 
 ### `binpacking/experiments/run_param_sweep.py`
 Uses binpacking config + scenarios to run the generic evaluation pipeline across
-many settings and writes outputs to `binpacking/results/param_sweep/<scenario>/`.
+many settings and writes outputs to `outputs/binpacking/results/param_sweep/<scenario>/`.
 
 Example:
 ```
-python -m binpacking.experiments.run_param_sweep \
-  --base-config configs/binpacking.yaml \
+python scripts/run_param_sweep.py \
+  --base-config configs/binpacking/binpacking.yaml \
   --scenarios baseline_midvar_off40_on60 \
   --pipelines binpacking_milp+cost_best_fit \
   --seeds 1 2 3

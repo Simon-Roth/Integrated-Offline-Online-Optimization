@@ -9,25 +9,22 @@ import gurobipy as gp
 from gurobipy import GRB
 import numpy as np
 
-from generic.config import Config
-from generic.data.instance_generators import (
+from generic.core.config import Config
+from generic.data.instance_generators import BaseInstanceGenerator
+from generic.data.generator_utils import (
     _ensure_row_feasible,
     _build_feas_constraints,
-    _build_block_cap_matrix,
-    _normalize_beta_params,
-    _normalize_bounds,
-    _require_block_structure,
-    _sample_cap_vectors,
+    _sample_feas_mask_by_option,
 )
 from generic.data.offline_milp_assembly import build_offline_milp_data_from_arrays
-from generic.general_utils import (
-    action_is_feasible,
+from generic.core.utils import (
+    option_is_feasible,
     effective_capacity,
-    feasible_action_indices,
+    feasible_option_indices,
     make_rng,
     scalarize_vector,
 )
-from generic.models import AssignmentState, Instance, OnlineItem, Decision
+from generic.core.models import AssignmentState, Instance, StepSpec, Decision
 from generic.online.policy_utils import (
     current_cost_row,
     lookup_assignment_cost,
@@ -43,17 +40,17 @@ class BaseOnlinePolicy(Protocol):
 
     def select_action(
         self,
-        item: OnlineItem,
+        step: StepSpec,
         state: AssignmentState,
         instance: Instance,
     ) -> Decision:
         """
-        Decide how to place 'item' given the current assignment state.
+        Decide how to act on the arriving step given the current assignment state.
 
         Parameters
         ----------
-        item:
-            The arriving online item.
+        step:
+            The arriving online step (with its A_t^{cap}, A_t^{feas}, b_t).
         state:
             Current assignment state (will be mutated by the solver after the decision).
         instance:
@@ -62,7 +59,7 @@ class BaseOnlinePolicy(Protocol):
         Returns
         -------
         Decision:
-            Encodes action selection, evictions, reassignments, and incremental cost.
+            Encodes option selection, evictions, reassigned_offline_steps, and incremental cost.
         """
         ...
 
@@ -92,7 +89,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         log_to_console: bool = False,
     ) -> None:
         self.cfg = cfg
-        from generic.offline.offline_solver import OfflineMILPSolver
+        from generic.offline.solver import OfflineMILPSolver
 
         self._solver = OfflineMILPSolver(
             cfg,
@@ -112,7 +109,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
 
     def select_action(
         self,
-        item: OnlineItem,
+        step: StepSpec,
         state: AssignmentState,
         instance: Instance,
     ) -> Decision:
@@ -124,12 +121,12 @@ class PrimalDualPolicy(BaseOnlinePolicy):
 
         # Step 3: observe A_t^{cap}, feasibility, and c_t (assignment costs).
         n = instance.n
-        fallback_idx = instance.fallback_action_index
+        fallback_idx = instance.fallback_option_index
         cols = n + (1 if fallback_idx >= 0 else 0)
-        cap_matrix = np.asarray(item.cap_matrix, dtype=float)
-        feas_matrix = np.asarray(item.feas_matrix, dtype=float)
-        feas_rhs = np.asarray(item.feas_rhs, dtype=float)
-        costs = current_cost_row(self.cfg, instance, item.id, cols).reshape(1, -1)
+        cap_matrix = np.asarray(step.cap_matrix, dtype=float)
+        feas_matrix = np.asarray(step.feas_matrix, dtype=float)
+        feas_rhs = np.asarray(step.feas_rhs, dtype=float)
+        costs = current_cost_row(self.cfg, instance, step.step_id, cols).reshape(1, -1)
 
         # Step 4: solve the price-aware MILP for this single arrival.
         capacities = remaining_capacities(
@@ -140,7 +137,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         )
         target = self._current_target(capacities)
         costs = self._price_aware_costs(costs, cap_matrix, n, target)
-        assigned_action = self._solve_price_aware_milp(
+        assigned_option = self._solve_price_aware_milp(
             cap_matrix,
             costs,
             feas_matrix,
@@ -150,13 +147,13 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         )
 
         # Step 5-7: apply x_t (the OnlineSolver updates state/load), then update lambda.
-        self._update_duals(assigned_action, cap_matrix, n, capacities)
+        self._update_duals(assigned_option, cap_matrix, n, capacities)
 
-        incremental_cost = lookup_assignment_cost(self.cfg, instance, item.id, assigned_action)
+        incremental_cost = lookup_assignment_cost(self.cfg, instance, step.step_id, assigned_option)
         return Decision(
-            placed_item=(item.id, int(assigned_action)),
-            evicted_offline=[],
-            reassignments=[],
+            placed_step=(step.step_id, int(assigned_option)),
+            evicted_offline_steps=[],
+            reassigned_offline_steps=[],
             incremental_cost=incremental_cost,
         )
 
@@ -172,7 +169,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
             effective_capacity(instance.b, use_slack, slack_fraction),
             dtype=float,
         ).reshape(-1)
-        T = max(1, len(instance.online_items))
+        T = max(1, len(instance.online_steps))
         self._effective_caps = caps_eff
         self._cap_per_step = caps_eff / float(T)
         self._total_steps = T
@@ -210,7 +207,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
             return scaled.T @ self._lambda
         return cap.T @ self._lambda
 
-    # Solve the one-step price-aware MILP and return the chosen action.
+    # Solve the one-step price-aware MILP and return the chosen option.
     def _solve_price_aware_milp(
         self,
         cap_matrix: np.ndarray,
@@ -233,23 +230,23 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         rh_state, rh_info = self._solver.solve_from_data(data)
         if not rh_info.feasible:
             raise PolicyInfeasibleError("Primal-dual MILP has no feasible solution.")
-        assigned_action = rh_state.assigned_action.get(0)
-        if assigned_action is None:
-            raise PolicyInfeasibleError("Primal-dual MILP did not assign the current item.")
-        return int(assigned_action)
+        assigned_option = rh_state.assigned_option.get(0)
+        if assigned_option is None:
+            raise PolicyInfeasibleError("Primal-dual MILP did not assign the current step.")
+        return int(assigned_option)
 
     # Update dual prices after choosing x_t.
     def _update_duals(
         self,
-        assigned_action: int,
+        assigned_option: int,
         cap_matrix: np.ndarray,
         n: int,
         remaining_caps: np.ndarray,
     ) -> None:
         eta_t = self._eta_t() * self._eta_scale
         usage = np.zeros_like(self._lambda)
-        if 0 <= assigned_action < n:
-            usage = cap_matrix[:, assigned_action]
+        if 0 <= assigned_option < n:
+            usage = cap_matrix[:, assigned_option]
         target = self._current_target(remaining_caps)
         if self.cfg.primal_dual.normalize_update:
             denom = np.where(target > 1.0, target, 1.0)
@@ -293,13 +290,13 @@ class PrimalDualPolicy(BaseOnlinePolicy):
             costs = instance.costs.assignment_costs
             if costs is None or not costs.size or n <= 0:
                 return max(min_scale, 1.0)
-            online_ids = [item.id for item in instance.online_items]
-            if not online_ids:
-                return max(min_scale, 1.0)
-            values = costs[np.asarray(online_ids, dtype=int), :n].reshape(-1)
-            if values.size == 0:
-                return max(min_scale, 1.0)
-            return max(min_scale, float(np.mean(values)))
+        online_step_ids = [step_spec.step_id for step_spec in instance.online_steps]
+        if not online_step_ids:
+            return max(min_scale, 1.0)
+        values = costs[np.asarray(online_step_ids, dtype=int), :n].reshape(-1)
+        if values.size == 0:
+            return max(min_scale, 1.0)
+        return max(min_scale, float(np.mean(values)))
         raise ValueError(f"Unknown cost_scale_mode: {self.cfg.primal_dual.cost_scale_mode}")
 
 
@@ -312,7 +309,7 @@ class SimDualPolicy(BaseOnlinePolicy):
         self,
         cfg: Config,
         *,
-        price_path: Path = Path("generic/results/sim_dual.json"),
+        price_path: Path = Path("outputs/generic/results/sim_dual.json"),
         time_limit: int = 60,
         mip_gap: float = 0.01,
         threads: int = 0,
@@ -321,7 +318,7 @@ class SimDualPolicy(BaseOnlinePolicy):
         self.cfg = cfg
         self._price_path = price_path
         self._lambda = self._load_prices(price_path)
-        from generic.offline.offline_solver import OfflineMILPSolver
+        from generic.offline.solver import OfflineMILPSolver
 
         self._solver = OfflineMILPSolver(
             cfg,
@@ -333,23 +330,23 @@ class SimDualPolicy(BaseOnlinePolicy):
 
     def select_action(
         self,
-        item: OnlineItem,
+        step: StepSpec,
         state: AssignmentState,
         instance: Instance,
     ) -> Decision:
         # Step 1: observe A_t^{cap}, feasibility, and c_t (assignment costs)
         n = instance.n
-        fallback_idx = instance.fallback_action_index
+        fallback_idx = instance.fallback_option_index
         cols = n + (1 if fallback_idx >= 0 else 0)
-        cap_matrix = np.asarray(item.cap_matrix, dtype=float)
-        feas_matrix = np.asarray(item.feas_matrix, dtype=float)
-        feas_rhs = np.asarray(item.feas_rhs, dtype=float)
-        costs = current_cost_row(self.cfg, instance, item.id, cols).reshape(1, -1)
+        cap_matrix = np.asarray(step.cap_matrix, dtype=float)
+        feas_matrix = np.asarray(step.feas_matrix, dtype=float)
+        feas_rhs = np.asarray(step.feas_rhs, dtype=float)
+        costs = current_cost_row(self.cfg, instance, step.step_id, cols).reshape(1, -1)
 
         # Step 2: add fixed dual prices to the objective and solve the one-step MILP.
         capacities = remaining_capacities(self.cfg, state, instance)
         costs = self._price_aware_costs(costs, cap_matrix, n)
-        assigned_action = self._solve_price_aware_milp(
+        assigned_option = self._solve_price_aware_milp(
             cap_matrix,
             costs,
             feas_matrix,
@@ -358,15 +355,15 @@ class SimDualPolicy(BaseOnlinePolicy):
             fallback_idx,
         )
 
-        incremental_cost = lookup_assignment_cost(self.cfg, instance, item.id, assigned_action)
+        incremental_cost = lookup_assignment_cost(self.cfg, instance, step.step_id, assigned_option)
         return Decision(
-            placed_item=(item.id, int(assigned_action)),
-            evicted_offline=[],
-            reassignments=[],
+            placed_step=(step.step_id, int(assigned_option)),
+            evicted_offline_steps=[],
+            reassigned_offline_steps=[],
             incremental_cost=incremental_cost,
         )
 
-    # Load per-action dual prices from JSON.
+    # Load per-option dual prices from JSON.
     def _load_prices(self, price_path: Path) -> dict[int, np.ndarray]:
         with open(price_path) as handle:
             data = json.load(handle)
@@ -378,30 +375,30 @@ class SimDualPolicy(BaseOnlinePolicy):
                 prices[int(key)] = np.asarray([float(value)], dtype=float)
         return prices
 
-    # Add lambda^T A_t^cap to assignment costs (regular actions only).
+    # Add lambda^T A_t^cap to assignment costs (regular options only).
     def _price_aware_costs(self, costs: np.ndarray, cap_matrix: np.ndarray, n: int) -> np.ndarray:
         if n <= 0:
             return costs
         cap = np.asarray(cap_matrix, dtype=float)
         price_terms = np.zeros((n,), dtype=float)
-        for action_id in range(n):
-            lam = self._lambda.get(action_id)
+        for option_id in range(n):
+            lam = self._lambda.get(option_id)
             if lam is None:
                 continue
             lam_vec = lam.reshape(-1)
-            col = cap[:, action_id].reshape(-1)
+            col = cap[:, option_id].reshape(-1)
             if lam_vec.size == 1 and col.size > 1:
                 lam_vec = np.full((col.size,), float(lam_vec[0]))
             if lam_vec.size != col.size:
                 raise ValueError(
-                    f"Price vector dimension mismatch for action {action_id}: "
+                    f"Price vector dimension mismatch for option {option_id}: "
                     f"{lam_vec.size} vs {col.size}"
                 )
-            price_terms[action_id] = float(np.dot(lam_vec, col))
+            price_terms[option_id] = float(np.dot(lam_vec, col))
         costs[0, :n] = costs[0, :n] + price_terms
         return costs
 
-    # Solve the one-step price-aware MILP and return the chosen action.
+    # Solve the one-step price-aware MILP and return the chosen option.
     def _solve_price_aware_milp(
         self,
         cap_matrix: np.ndarray,
@@ -424,10 +421,10 @@ class SimDualPolicy(BaseOnlinePolicy):
         rh_state, rh_info = self._solver.solve_from_data(data)
         if not rh_info.feasible:
             raise PolicyInfeasibleError("SimDual MILP has no feasible solution.")
-        assigned_action = rh_state.assigned_action.get(0)
-        if assigned_action is None:
-            raise PolicyInfeasibleError("SimDual MILP did not assign the current item.")
-        return int(assigned_action)
+        assigned_option = rh_state.assigned_option.get(0)
+        if assigned_option is None:
+            raise PolicyInfeasibleError("SimDual MILP did not assign the current step.")
+        return int(assigned_option)
 
 
 class RollingHorizonMILPPolicy(BaseOnlinePolicy):
@@ -447,7 +444,8 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
     ) -> None:
         self.cfg = cfg
         self._rng = make_rng(seed)
-        from generic.offline.offline_solver import OfflineMILPSolver
+        self._generator = BaseInstanceGenerator.from_config(cfg)
+        from generic.offline.solver import OfflineMILPSolver
 
         self._solver = OfflineMILPSolver(
             cfg,
@@ -459,23 +457,23 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
 
     def select_action(
         self,
-        item: OnlineItem,
+        step: StepSpec,
         state: AssignmentState,
         instance: Instance,
     ) -> Decision:
         # Step 1: observe A_t and remaining capacity (from state).
-        idx = self._online_index(item, instance)
-        remaining = max(0, len(instance.online_items) - idx - 1)
+        idx = self._online_index(step, instance)
+        remaining = max(0, len(instance.online_steps) - idx - 1)
 
         n = instance.n
-        fallback_idx = instance.fallback_action_index
+        fallback_idx = instance.fallback_option_index
         cols = n + (1 if fallback_idx >= 0 else 0)
 
         # Step 2: sample future A_tau for tau > t and build the remaining MILP.
-        cap_matrices = self._build_cap_matrices(item, instance, remaining)
-        costs = self._build_costs(instance, item.id, remaining, n, cols, online_index=idx)
+        cap_matrices = self._build_cap_matrices(step, instance, remaining)
+        costs = self._build_costs(instance, step.step_id, remaining, n, cols, online_index=idx)
         feas_matrices, feas_rhs = self._build_feasible(
-            item,
+            step,
             remaining,
             n,
             cols,
@@ -498,50 +496,50 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
         if not rh_info.feasible:
             raise PolicyInfeasibleError("Rolling horizon MILP has no feasible solution.")
 
-        assigned_action = rh_state.assigned_action.get(0)
-        if assigned_action is None:
-            raise PolicyInfeasibleError("Rolling horizon MILP did not assign the current item.")
-        # Step 4-5: fix x_t (current item), OnlineSolver updates remaining capacity after applying.
-        incremental_cost = lookup_assignment_cost(self.cfg, instance, item.id, assigned_action)
+        assigned_option = rh_state.assigned_option.get(0)
+        if assigned_option is None:
+            raise PolicyInfeasibleError("Rolling horizon MILP did not assign the current step.")
+        # Step 4-5: fix x_t (current step), OnlineSolver updates remaining capacity after applying.
+        incremental_cost = lookup_assignment_cost(self.cfg, instance, step.step_id, assigned_option)
         return Decision(
-            placed_item=(item.id, int(assigned_action)),
-            evicted_offline=[],
-            reassignments=[],
+            placed_step=(step.step_id, int(assigned_option)),
+            evicted_offline_steps=[],
+            reassigned_offline_steps=[],
             incremental_cost=incremental_cost,
         )
 
-    # Map online item id to its index in the arrival sequence.
-    def _online_index(self, item: OnlineItem, instance: Instance) -> int:
-        base = len(instance.offline_items)
-        idx = item.id - base
-        if idx < 0 or idx >= len(instance.online_items):
-            raise KeyError(f"Online item id {item.id} is out of expected range.")
-        if instance.online_items[idx].id != item.id:
+    # Map online step id to its index in the arrival sequence.
+    def _online_index(self, step: StepSpec, instance: Instance) -> int:
+        base = len(instance.offline_steps)
+        idx = step.step_id - base
+        if idx < 0 or idx >= len(instance.online_steps):
+            raise KeyError(f"Online step id {step.step_id} is out of expected range.")
+        if instance.online_steps[idx].step_id != step.step_id:
             raise KeyError(
-                f"Online item id {item.id} does not match instance ordering."
+                f"Online step id {step.step_id} does not match instance ordering."
             )
         return idx
 
-    # Stack current item A_t^{cap} with sampled future A_tau^{cap}.
-    def _build_cap_matrices(self, item: OnlineItem, instance: Instance, remaining: int) -> np.ndarray:
-        current = np.asarray(item.cap_matrix, dtype=float).reshape(1, *item.cap_matrix.shape)
+    # Stack current step A_t^{cap} with sampled future A_tau^{cap}.
+    def _build_cap_matrices(self, step: StepSpec, instance: Instance, remaining: int) -> np.ndarray:
+        current = np.asarray(step.cap_matrix, dtype=float).reshape(1, *step.cap_matrix.shape)
         if remaining <= 0:
             return current
-        d = _require_block_structure(instance.n, instance.m)
-        beta_params = _normalize_beta_params(self.cfg.cap_coeffs.online_beta, d)
-        bounds = _normalize_bounds(self.cfg.cap_coeffs.online_bounds, d)
-        samples = _sample_cap_vectors(self.cfg, self._rng, remaining, beta_params=beta_params, bounds=bounds)
-        future = np.stack(
-            [_build_block_cap_matrix(samples[idx], instance.n, d) for idx in range(remaining)],
-            axis=0,
+        future = self._generator.sample_cap_matrices(
+            self.cfg,
+            self._rng,
+            remaining,
+            instance.n,
+            instance.m,
+            phase="online",
         )
         return np.vstack([current, future])
 
-    # Build assignment costs for current + sampled items.
+    # Build assignment costs for current + sampled steps.
     def _build_costs(
         self,
         instance: Instance,
-        item_id: int,
+        step_id: int,
         remaining: int,
         n: int,
         cols: int,
@@ -549,28 +547,28 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
         online_index: int,
     ) -> np.ndarray:
         costs = np.zeros((1 + remaining, cols), dtype=float)
-        costs[0] = current_cost_row(self.cfg, instance, item_id, cols)
+        costs[0] = current_cost_row(self.cfg, instance, step_id, cols)
         if remaining <= 0:
             return costs
-        future_items = instance.online_items[online_index + 1 : online_index + 1 + remaining]
-        for offset, future_item in enumerate(future_items, start=1):
-            costs[offset] = current_cost_row(self.cfg, instance, future_item.id, cols)
+        future_steps = instance.online_steps[online_index + 1 : online_index + 1 + remaining]
+        for offset, future_step in enumerate(future_steps, start=1):
+            costs[offset] = current_cost_row(self.cfg, instance, future_step.step_id, cols)
         return costs
 
-    # Build feasibility rows for current + sampled items.
+    # Build feasibility rows for current + sampled steps.
     def _build_feasible(
         self,
-        item: OnlineItem,
+        step: StepSpec,
         remaining: int,
         n: int,
         cols: int,
         fallback_idx: int,
     ) -> tuple[list[np.ndarray], list[np.ndarray]]:
-        current_mats = [np.asarray(item.feas_matrix, dtype=float)]
-        current_rhs = [np.asarray(item.feas_rhs, dtype=float)]
+        current_mats = [np.asarray(step.feas_matrix, dtype=float)]
+        current_rhs = [np.asarray(step.feas_rhs, dtype=float)]
         if remaining <= 0:
             return current_mats, current_rhs
-        base_mask = (self._rng.uniform(size=(remaining, n)) < self.cfg.feasibility.p_onl).astype(int)
+        base_mask = _sample_feas_mask_by_option(self.cfg, self._rng, remaining, n, phase="online")
         _ensure_row_feasible(base_mask, self._rng)
         future_mats: list[np.ndarray] = []
         future_rhs: list[np.ndarray] = []
@@ -599,46 +597,48 @@ class GenericDynamicLearningPolicy(BaseOnlinePolicy):
         self._phase_idx: int = -1
         self._schedule: List[int] = []
         self._current_prices: Optional[np.ndarray] = None  # length m
-        self._processed: int = 0  # number of arrivals already placed
-        self._seen_items: List[OnlineItem] = []
+        self._processed: int = 0  # number of online steps already placed
+        self._seen_steps: List[StepSpec] = []
         self._log_records: List[Dict[str, object]] = []
-        from generic.offline.offline_solver import OfflineMILPSolver
+        from generic.offline.solver import OfflineMILPSolver
 
         self._milp_solver = OfflineMILPSolver(cfg)
 
     def select_action(
         self,
-        item: OnlineItem,
+        step: StepSpec,
         state: AssignmentState,
         instance: Instance,
     ) -> Decision:
         # Lazily build phase schedule on the first call.
         if not self._schedule:
-            self._schedule = self._build_schedule(len(instance.online_items))
+            self._schedule = self._build_schedule(len(instance.online_steps))
 
-        # Update prices if a phase boundary was reached after the last item.
+        # Update prices if a phase boundary was reached after the last step.
         self._maybe_update_prices(state, instance)
 
-        candidate_actions = self._candidate_actions(item, instance)
-        if not candidate_actions:
-            raise PolicyInfeasibleError(f"No feasible regular action for online item {item.id}")
+        candidate_options = self._candidate_options(step, instance)
+        if not candidate_options:
+            raise PolicyInfeasibleError(
+                f"No feasible regular option for online step {step.step_id}"
+            )
 
-        # First, try to place without evictions via a one-item MILP (regular actions only).
-        milp_decision = self._milp_no_eviction(item, state, instance)
+        # First, try to place without evictions via a one-step MILP (regular options only).
+        milp_decision = self._milp_no_eviction(step, state, instance)
         if milp_decision is not None:
-            self._mark_processed(item)
+            self._mark_processed(step)
             return milp_decision
 
-        # No feasible regular action (no evictions in generic policy).
+        # No feasible regular option (no evictions in generic policy).
         raise PolicyInfeasibleError(
-            f"GenericDynamicLearningPolicy could not place item {item.id}"
+            f"GenericDynamicLearningPolicy could not place step {step.step_id}"
         )
 
     # ------------------------------------------------------------------
     # Pricing + scheduling
     # ------------------------------------------------------------------
     def _build_schedule(self, horizon: int) -> List[int]:
-        """Geometric schedule t_k = ε * M_onl * 2^k (rounded to ints)."""
+        """Geometric schedule t_k = ε * T_onl * 2^k (rounded to ints)."""
         eps = max(self.cfg.dla.epsilon, 1e-9)
         min_len = max(1, int(self.cfg.dla.min_phase_len))
         schedule: List[int] = []
@@ -656,7 +656,7 @@ class GenericDynamicLearningPolicy(BaseOnlinePolicy):
         return schedule
 
     def _maybe_update_prices(self, state: AssignmentState, instance: Instance) -> None:
-        """Update prices when we've completed a phase (after placing t_k items)."""
+        """Update prices when we've completed a phase (after placing t_k steps)."""
         if self._processed == 0:
             return
         if self._phase_idx + 1 >= len(self._schedule):
@@ -665,9 +665,9 @@ class GenericDynamicLearningPolicy(BaseOnlinePolicy):
         if self._processed < next_boundary:
             return
 
-        # Compute new prices using observed items up to t_k = next_boundary.
+        # Compute new prices using observed steps up to t_k = next_boundary.
         t_k = next_boundary
-        horizon = max(1, len(instance.online_items))
+        horizon = max(1, len(instance.online_steps))
         h_k = self.cfg.dla.epsilon * math.sqrt(horizon / float(t_k))
         self._current_prices = self._compute_prices(instance, state, t_k, h_k)
         self._phase_idx += 1
@@ -681,10 +681,10 @@ class GenericDynamicLearningPolicy(BaseOnlinePolicy):
         h_k: float,
     ) -> np.ndarray:
         """
-        Solve fractional LP on observed items to get dual prices for capacities.
+        Solve fractional LP on observed steps to get dual prices for capacities.
         Returns a global lambda vector (length m).
         """
-        observed: Sequence[OnlineItem] = self._seen_items[:t_k]
+        observed: Sequence[StepSpec] = self._seen_steps[:t_k]
         n = instance.n
         m = instance.m
         if m <= 0:
@@ -700,36 +700,39 @@ class GenericDynamicLearningPolicy(BaseOnlinePolicy):
 
         # Subtract fixed OFFLINE load (online load is modeled by LP vars).
         offline_load = np.zeros((m,), dtype=float)
-        fallback_idx = instance.fallback_action_index
-        for item_id, action_id in state.assigned_action.items():
-            if item_id >= len(instance.offline_items):
+        fallback_idx = instance.fallback_option_index
+        for step_id, option_id in state.assigned_option.items():
+            if step_id >= len(instance.offline_steps):
                 continue
-            if action_id < 0 or action_id == fallback_idx:
+            if option_id < 0 or option_id == fallback_idx:
                 continue
-            cap_mat = np.asarray(instance.offline_items[item_id].cap_matrix, dtype=float)
-            offline_load += cap_mat[:, action_id]
+            cap_mat = np.asarray(instance.offline_steps[step_id].cap_matrix, dtype=float)
+            offline_load += cap_mat[:, option_id]
 
         base_residual = np.maximum(0.0, eff_total - offline_load)
-        horizon = float(len(instance.online_items))
+        horizon = float(len(instance.online_steps))
         scaled = (1.0 - h_k) * (t_k / horizon) * base_residual
         residual = np.maximum(0.0, scaled)
 
         x: Dict[tuple[int, int], gp.Var] = {}
         y_fallback: Dict[int, gp.Var] = {}
-        cap_by_id = {item.id: np.asarray(item.cap_matrix, dtype=float) for item in observed}
-        for item in observed:
-            feasible_actions = feasible_action_indices(
-                item.feas_matrix,
-                item.feas_rhs,
-                action_ids=range(n),
+        cap_by_id = {
+            step_spec.step_id: np.asarray(step_spec.cap_matrix, dtype=float)
+            for step_spec in observed
+        }
+        for step_spec in observed:
+            feasible_options = feasible_option_indices(
+                step_spec.feas_matrix,
+                step_spec.feas_rhs,
+                option_ids=range(n),
             )
-            for i in feasible_actions:
-                x[(item.id, i)] = model.addVar(
-                    lb=0.0, ub=1.0, name=f"x_{item.id}_{i}"
+            for i in feasible_options:
+                x[(step_spec.step_id, i)] = model.addVar(
+                    lb=0.0, ub=1.0, name=f"x_{step_spec.step_id}_{i}"
                 )
-            if action_is_feasible(item.feas_matrix, item.feas_rhs, fallback_idx):
-                y_fallback[item.id] = model.addVar(
-                    lb=0.0, ub=1.0, name=f"y_fallback_{item.id}"
+            if option_is_feasible(step_spec.feas_matrix, step_spec.feas_rhs, fallback_idx):
+                y_fallback[step_spec.step_id] = model.addVar(
+                    lb=0.0, ub=1.0, name=f"y_fallback_{step_spec.step_id}"
                 )
         model.update()
 
@@ -741,12 +744,12 @@ class GenericDynamicLearningPolicy(BaseOnlinePolicy):
             )
             cap_constr[r] = model.addConstr(expr <= float(residual[r]), name=f"cap_{r}")
 
-        for item in observed:
-            item_vars = [var for (j, _), var in x.items() if j == item.id]
-            expr = gp.quicksum(item_vars)
-            if item.id in y_fallback:
-                expr += y_fallback[item.id]
-            model.addConstr(expr == 1.0, name=f"assign_{item.id}")
+        for step_spec in observed:
+            step_vars = [var for (j, _), var in x.items() if j == step_spec.step_id]
+            expr = gp.quicksum(step_vars)
+            if step_spec.step_id in y_fallback:
+                expr += y_fallback[step_spec.step_id]
+            model.addConstr(expr == 1.0, name=f"assign_{step_spec.step_id}")
 
         obj = gp.quicksum(instance.costs.assignment_costs[j, i] * var for (j, i), var in x.items())
         if y_fallback:
@@ -792,8 +795,8 @@ class GenericDynamicLearningPolicy(BaseOnlinePolicy):
                 indent=2,
             )
 
-    def _mark_processed(self, item: OnlineItem) -> None:
-        self._seen_items.append(item)
+    def _mark_processed(self, step: StepSpec) -> None:
+        self._seen_steps.append(step)
         self._processed += 1
 
     # ------------------------------------------------------------------
@@ -801,26 +804,31 @@ class GenericDynamicLearningPolicy(BaseOnlinePolicy):
     # ------------------------------------------------------------------
     def _milp_no_eviction(
         self,
-        item: OnlineItem,
+        step: StepSpec,
         state: AssignmentState,
         instance: Instance,
     ) -> Optional[Decision]:
-        regular_actions = instance.n
-        if regular_actions <= 0:
+        regular_options = instance.n
+        if regular_options <= 0:
             return None
-        if not feasible_action_indices(
-            item.feas_matrix, item.feas_rhs, action_ids=range(regular_actions)
+        if not feasible_option_indices(
+            step.feas_matrix, step.feas_rhs, option_ids=range(regular_options)
         ):
             return None
 
         costs = np.array(
-            [[self._score(action_id, item, instance) for action_id in range(regular_actions)]],
+            [
+                [
+                    self._score(option_id, step, instance)
+                    for option_id in range(regular_options)
+                ]
+            ],
             dtype=float,
         )
-        cap_matrix = np.asarray(item.cap_matrix, dtype=float)
+        cap_matrix = np.asarray(step.cap_matrix, dtype=float)
         capacities = remaining_capacities(self.cfg, state, instance)
-        feas_matrix = np.asarray(item.feas_matrix, dtype=float)[:, :regular_actions]
-        feas_rhs = np.asarray(item.feas_rhs, dtype=float)
+        feas_matrix = np.asarray(step.feas_matrix, dtype=float)[:, :regular_options]
+        feas_rhs = np.asarray(step.feas_rhs, dtype=float)
         data = build_offline_milp_data_from_arrays(
             cap_matrices=cap_matrix.reshape(1, *cap_matrix.shape),
             costs=costs,
@@ -834,29 +842,31 @@ class GenericDynamicLearningPolicy(BaseOnlinePolicy):
         rh_state, rh_info = self._milp_solver.solve_from_data(data)
         if not rh_info.feasible:
             return None
-        assigned_action = rh_state.assigned_action.get(0)
-        if assigned_action is None:
+        assigned_option = rh_state.assigned_option.get(0)
+        if assigned_option is None:
             return None
-        incremental_cost = lookup_assignment_cost(self.cfg, instance, item.id, assigned_action)
+        incremental_cost = lookup_assignment_cost(self.cfg, instance, step.step_id, assigned_option)
         return Decision(
-            placed_item=(item.id, int(assigned_action)),
-            evicted_offline=[],
-            reassignments=[],
+            placed_step=(step.step_id, int(assigned_option)),
+            evicted_offline_steps=[],
+            reassigned_offline_steps=[],
             incremental_cost=incremental_cost,
         )
 
-    def _candidate_actions(
+    def _candidate_options(
         self,
-        item: OnlineItem,
+        step: StepSpec,
         instance: Instance,
     ) -> List[int]:
-        regular_actions = instance.n
-        return feasible_action_indices(item.feas_matrix, item.feas_rhs, action_ids=range(regular_actions))
+        regular_options = instance.n
+        return feasible_option_indices(
+            step.feas_matrix, step.feas_rhs, option_ids=range(regular_options)
+        )
 
-    def _score(self, action_id: int, item: OnlineItem, instance: Instance) -> float:
-        c_ji = lookup_assignment_cost(self.cfg, instance, item.id, action_id)
-        cap_matrix = np.asarray(item.cap_matrix, dtype=float)
-        usage = cap_matrix[:, action_id]
+    def _score(self, option_id: int, step: StepSpec, instance: Instance) -> float:
+        c_ji = lookup_assignment_cost(self.cfg, instance, step.step_id, option_id)
+        cap_matrix = np.asarray(step.cap_matrix, dtype=float)
+        usage = cap_matrix[:, option_id]
         lam = self._current_prices
         if lam is None or lam.size == 0:
             lam = np.zeros_like(usage)

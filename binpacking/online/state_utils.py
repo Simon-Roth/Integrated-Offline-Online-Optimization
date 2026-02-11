@@ -5,10 +5,18 @@ from typing import Dict, Optional, List, Callable
 
 import numpy as np
 
-from generic.config import Config
-from generic.general_utils import effective_capacity, vector_fits, usage_total
-from generic.models import AssignmentState, Instance, OnlineItem, Decision
-from binpacking.block_utils import block_dim, extract_volume, split_capacities
+from generic.core.config import Config
+from generic.core.utils import (
+    option_is_feasible,
+    effective_capacity,
+    feasible_option_indices,
+    residual_vector,
+    scalarize_vector,
+    usage_total,
+    vector_fits,
+)
+from generic.core.models import AssignmentState, Instance, StepSpec, Decision
+from binpacking.core.block_utils import block_dim, extract_volume, split_capacities
 
 TOLERANCE = 1e-9
 
@@ -37,7 +45,7 @@ def build_context(cfg: Config, instance: Instance, state: AssignmentState) -> Pl
     if load_vec.shape[0] != n * d:
         raise ValueError("State load does not match expected block structure.")
     loads = load_vec.reshape((n, d)).copy()
-    assignments = dict(state.assigned_action)
+    assignments = dict(state.assigned_option)
     use_slack = cfg.slack.enforce_slack and getattr(cfg.slack, "apply_to_online", True)
     effective_caps = np.asarray(effective_capacities(instance, cfg, use_slack=use_slack))
     offline_vols = offline_volumes(instance)
@@ -59,7 +67,7 @@ def offline_volumes(instance: Instance) -> Dict[int, np.ndarray]:
     """Map offline item_id -> volume vector."""
     n = instance.n
     m = instance.m
-    return {item.id: extract_volume(item.cap_matrix, n, m) for item in instance.offline_items}
+    return {item.step_id: extract_volume(item.cap_matrix, n, m) for item in instance.offline_steps}
 
 
 def effective_capacities(
@@ -88,7 +96,7 @@ def eviction_penalty(usage: np.ndarray, cfg: Config) -> float:
 
 def execute_placement(
     target_bin: int,
-    item: OnlineItem,
+    item: StepSpec,
     ctx: PlacementContext,
     *,
     eviction_order_fn: EvictionOrderFn,
@@ -109,7 +117,7 @@ def execute_placement(
     assignments = dict(base_assignments)
     instance = ctx.instance
     cfg = ctx.cfg
-    fallback_idx = instance.fallback_action_index
+    fallback_idx = instance.fallback_option_index
     regular_bins = instance.n
     # Mutable context so destination_fn sees up-to-date loads during evictions.
     ctx_mut = PlacementContext(
@@ -122,7 +130,7 @@ def execute_placement(
     )
 
     evicted_pairs: List[tuple[int, int]] = []
-    reassignments: List[tuple[int, int]] = []
+    reassigned_offline_steps: List[tuple[int, int]] = []
     incremental_cost = 0.0
 
     def _current_load(bin_id: int) -> np.ndarray:
@@ -136,11 +144,11 @@ def execute_placement(
     if vector_fits(_current_load(target_bin), required_volume, capacity, TOLERANCE):
         # No eviction needed, simply reserve the space and pay assignment cost.
         loads[target_bin] += required_volume
-        assignment_cost = float(instance.costs.assignment_costs[item.id, target_bin])
+        assignment_cost = float(instance.costs.assignment_costs[item.step_id, target_bin])
         decision = Decision(
-            placed_item=(item.id, target_bin),
-            evicted_offline=[],
-            reassignments=[],
+            placed_step=(item.step_id, target_bin),
+            evicted_offline_steps=[],
+            reassigned_offline_steps=[],
             incremental_cost=assignment_cost,
         )
         # Commit simulated changes back to the shared context.
@@ -191,17 +199,17 @@ def execute_placement(
         incremental_cost += new_cost - old_cost + penalty
 
         evicted_pairs.append((offline_id, origin))
-        reassignments.append((offline_id, dest_bin))
+        reassigned_offline_steps.append((offline_id, dest_bin))
 
     if not vector_fits(_current_load(target_bin), required_volume, capacity, TOLERANCE):
         return None
 
     loads[target_bin] += required_volume
-    incremental_cost += float(instance.costs.assignment_costs[item.id, target_bin])
+    incremental_cost += float(instance.costs.assignment_costs[item.step_id, target_bin])
     decision = Decision(
-        placed_item=(item.id, target_bin),
-        evicted_offline=evicted_pairs,
-        reassignments=reassignments,
+        placed_step=(item.step_id, target_bin),
+        evicted_offline_steps=evicted_pairs,
+        reassigned_offline_steps=reassigned_offline_steps,
         incremental_cost=incremental_cost,
     )
     # Commit simulated changes on success.
@@ -209,3 +217,75 @@ def execute_placement(
     base_assignments.clear()
     base_assignments.update(assignments)
     return decision
+
+
+def candidate_bins(item: StepSpec, instance: Instance) -> List[int]:
+    """Feasible regular bins for this item (excludes fallback)."""
+    regular_bins = list(range(instance.n))
+    return feasible_option_indices(item.feas_matrix, item.feas_rhs, option_ids=regular_bins)
+
+
+def eviction_order_desc(bin_id: int, ctx: PlacementContext, *, size_key: str) -> List[int]:
+    """Offline items in a bin, sorted by size (descending)."""
+    offline_ids = [
+        itm_id
+        for itm_id, assigned_bin in ctx.assignments.items()
+        if assigned_bin == bin_id and itm_id < len(ctx.instance.offline_steps)
+    ]
+    zero_vec = np.zeros_like(ctx.effective_caps[0])
+    offline_ids.sort(
+        key=lambda oid: scalarize_vector(ctx.offline_volumes.get(oid, zero_vec), size_key),
+        reverse=True,
+    )
+    return offline_ids
+
+
+def select_reassignment_bin(
+    offline_id: int,
+    origin_bin: int,
+    ctx: PlacementContext,
+    *,
+    mode: str,
+    residual_mode: str,
+) -> Optional[int]:
+    """Choose a reassignment bin for an evicted offline item (cost or residual)."""
+    zero_vec = np.zeros_like(ctx.effective_caps[0])
+    volume = ctx.offline_volumes.get(offline_id, zero_vec)
+    instance = ctx.instance
+    regular_bins = instance.n
+    fallback_idx = instance.fallback_option_index
+    offline_item = instance.offline_steps[offline_id]
+
+    best_candidate: Optional[int] = None
+    best_cost = float("inf")
+    best_residual = float("inf")
+
+    for candidate in range(regular_bins):
+        if candidate == origin_bin or not option_is_feasible(
+            offline_item.feas_matrix, offline_item.feas_rhs, candidate
+        ):
+            continue
+        residual_vec = residual_vector(ctx.loads[candidate], volume, ctx.effective_caps[candidate])
+        if not vector_fits(ctx.loads[candidate], volume, ctx.effective_caps[candidate], TOLERANCE):
+            continue
+        residual_score = scalarize_vector(residual_vec, residual_mode)
+        if mode == "residual":
+            if residual_score < best_residual:
+                best_residual = residual_score
+                best_candidate = candidate
+        else:
+            cost = float(instance.costs.assignment_costs[offline_id, candidate])
+            if cost < best_cost - 1e-9 or (
+                abs(cost - best_cost) <= 1e-9 and residual_score < best_residual
+            ):
+                best_cost = cost
+                best_residual = residual_score
+                best_candidate = candidate
+
+    if best_candidate is not None:
+        return best_candidate
+
+    if option_is_feasible(offline_item.feas_matrix, offline_item.feas_rhs, fallback_idx):
+        return fallback_idx
+
+    return None

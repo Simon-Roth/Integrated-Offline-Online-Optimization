@@ -1,23 +1,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-plots/offline/results/
-results/*.pdf
-results/*.png
-plots/online/results/*.pdf
-plots/online/results/*.png
-plots/scenario/results/*.pdf
-plots/scenario/results/*.png
-plots/online/config_sweep/
-plots/online/slack_sweep/
-plots/online/results/
 .BAvenv/
-binpacking/results/offline_cache
+.DS_Store
 # Generated experiment outputs
-binpacking/results/**/*.json
-generic/results
-binpacking/data_analysis/**/param_sweep
-binpacking/data_analysis/**/param_sweep_feasoptions
-binpacking/data_analysis/**/param_sweep_only_dl
-binpacking/data_analysis/**/figures
-
+outputs/

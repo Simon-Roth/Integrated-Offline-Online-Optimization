@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, List, Sequence
 
-from binpacking.config import load_config
+from binpacking.core.config import load_config
 from binpacking.experiments.scenarios import apply_config_overrides, select_scenarios
 from generic.experiments.optimal_benchmark import run_optimal_benchmark
 from generic.experiments.pipeline_registry import (
@@ -36,13 +36,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--base-config",
         type=Path,
-        default=Path("configs/binpacking.yaml"),
+        default=Path("configs/binpacking/binpacking.yaml"),
         help="Path to the base YAML config.",
     )
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("binpacking/results/param_sweep"),
+        default=Path("outputs/binpacking/results/param_sweep"),
         help="Root directory for results (scenario subfolders created).",
     )
     parser.add_argument(
@@ -65,10 +65,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--m-onl",
-        dest="M_onl",
+        dest="T_onl",
         type=int,
         default=None,
-        help="Optional override for the number of online items.",
+        help="Optional override for the number of online steps.",
     )
     parser.add_argument(
         "--skip-optimal",
@@ -94,13 +94,13 @@ def _select_pipelines(all_specs: List[PipelineSpec], names: Sequence[str] | None
     return [lookup[name] for name in names]
 
 
-def _scenario_problem_meta(cfg, M_onl_override: int | None) -> dict[str, Any]:
-    M_onl = M_onl_override if M_onl_override is not None else cfg.stoch.horizon
+def _scenario_problem_meta(cfg, T_onl_override: int | None) -> dict[str, Any]:
+    T_onl = T_onl_override if T_onl_override is not None else cfg.stoch.T_onl
     return {
-        "n": int(cfg.problem.n),
-        "M_off": int(cfg.problem.M_off),
-        "M_on": int(M_onl),
-        "m": int(cfg.problem.m),
+        "n_options": int(cfg.problem.n),
+        "T_off": int(cfg.problem.T_off),
+        "T_onl": int(T_onl),
+        "m_resources": int(cfg.problem.m),
     }
 
 
@@ -134,11 +134,11 @@ def main() -> None:
             optimal_summary = run_optimal_benchmark(
                 scenario_cfg,
                 seeds=seeds,
-                M_onl=args.M_onl,
+                T_onl=args.T_onl,
             )
             optimal_summary["scenario"] = scenario.name
             optimal_summary["scenario_description"] = scenario.description
-            optimal_summary["problem"] = _scenario_problem_meta(scenario_cfg, args.M_onl)
+            optimal_summary["problem"] = _scenario_problem_meta(scenario_cfg, args.T_onl)
             optimal_path = scenario_dir / f"optimal_full_horizon_{timestamp}.json"
             optimal_path.write_text(json.dumps(optimal_summary, indent=2))
 
@@ -154,14 +154,14 @@ def main() -> None:
                 offline_solver_cls=offline_solver_cls,
                 online_policy_cls=online_policy_cls,
                 seeds=seeds,
-                M_onl=args.M_onl,
+                T_onl=args.T_onl,
                 offline_solver_name=spec.offline_solver,
                 online_policy_name=spec.online_policy,
             )
             summary["pipeline"] = spec.name
             summary["scenario"] = scenario.name
             summary["scenario_description"] = scenario.description
-            summary["problem"] = _scenario_problem_meta(scenario_cfg, args.M_onl)
+            summary["problem"] = _scenario_problem_meta(scenario_cfg, args.T_onl)
 
             output_path = scenario_dir / f"eval_{spec.name}_{timestamp}.json"
             output_path.write_text(json.dumps(summary, indent=2))

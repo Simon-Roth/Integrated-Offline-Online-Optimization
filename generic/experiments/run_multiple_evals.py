@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, List
 
-from generic.config import load_config
+from generic.core.config import load_config
 from generic.experiments.pipeline_registry import (
     PipelineSpec,
     default_registry,
@@ -31,7 +31,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run multiple generic pipelines and write aggregated JSON outputs."
     )
-    parser.add_argument("--config", default="configs/generic.yaml", help="Path to generic YAML.")
+    parser.add_argument("--config", default="configs/generic/generic.yaml", help="Path to generic YAML.")
     parser.add_argument(
         "--pipelines",
         nargs="*",
@@ -40,7 +40,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="generic/results",
+        default="outputs/generic/results",
         help="Directory for aggregated JSON outputs.",
     )
     parser.add_argument(
@@ -52,10 +52,10 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--m-onl",
-        dest="M_onl",
+        dest="T_onl",
         type=int,
         default=None,
-        help="Optional override for the number of online items.",
+        help="Optional override for the number of online steps.",
     )
     parser.add_argument(
         "--compute-optimal",
@@ -92,7 +92,7 @@ def main() -> None:
         optimal_summary = run_optimal_benchmark(
             cfg,
             seeds=seeds,
-            M_onl=args.M_onl,
+            T_onl=args.T_onl,
         )
         optimal_path = output_dir / f"optimal_full_horizon_{timestamp}.json"
         optimal_path.write_text(json.dumps(optimal_summary, indent=2))
@@ -107,7 +107,7 @@ def main() -> None:
             offline_solver_cls=offline_solver_cls,
             online_policy_cls=online_policy_cls,
             seeds=seeds,
-            M_onl=args.M_onl,
+            T_onl=args.T_onl,
             offline_solver_name=spec.offline_solver,
             online_policy_name=spec.online_policy,
         )

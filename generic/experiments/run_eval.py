@@ -9,17 +9,17 @@ from typing import Any, Dict, Iterable, List, Optional, Type
 
 import numpy as np
 
-from generic.config import Config, load_config
-from generic.data.instance_generators import generate_instance_with_online
+from generic.core.config import Config, load_config
+from generic.data.instance_generators import BaseInstanceGenerator
 from generic.data.offline_milp_assembly import build_offline_milp_data
-from generic.general_utils import effective_capacity, set_global_seed
+from generic.core.utils import effective_capacity, set_global_seed
 from generic.experiments.pipeline_registry import (
     ONLINE_SIM_DUAL,
     online_policy_needs_prices,
     online_policy_price_path,
 )
-from generic.offline.offline_solver import OfflineMILPSolver
-from generic.online.online_solver import OnlineSolver
+from generic.offline.solver import OfflineMILPSolver
+from generic.online.solver import OnlineSolver
 from generic.online.policies import BaseOnlinePolicy
 from generic.online import state_utils
 
@@ -39,10 +39,10 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a generic offline+online evaluation and write an aggregated JSON summary."
     )
-    parser.add_argument("--config", default="configs/generic.yaml", help="Path to generic YAML.")
+    parser.add_argument("--config", default="configs/generic/generic.yaml", help="Path to generic YAML.")
     parser.add_argument(
         "--offline-solver",
-        default="generic.offline.offline_solver.OfflineMILPSolver",
+        default="generic.offline.solver.OfflineMILPSolver",
         help="Import path to offline solver class.",
     )
     parser.add_argument(
@@ -52,7 +52,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="generic/results",
+        default="outputs/generic/results",
         help="Directory for aggregated JSON output.",
     )
     parser.add_argument(
@@ -69,10 +69,10 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--m-onl",
-        dest="M_onl",
+        dest="T_onl",
         type=int,
         default=None,
-        help="Optional override for the number of online items.",
+        help="Optional override for the number of online steps.",
     )
     return parser.parse_args()
 
@@ -115,17 +115,17 @@ def _build_run_summary(
     summary = {
         "seed": seed,
         "problem": {
-            "n": int(instance.n),
-            "M_off": len(instance.offline_items),
-            "M_on": len(instance.online_items),
-            "m": int(instance.m),
+            "n_options": int(instance.n),
+            "T_off": len(instance.offline_steps),
+            "T_onl": len(instance.online_steps),
+            "m_resources": int(instance.m),
         },
         "offline": {
             "status": offline_info.status,
             "objective": float(offline_info.obj_value),
             "runtime": float(offline_info.runtime),
-            "fallback_items": int(offline_fallback),
-            "unplaced_items": int(offline_unplaced),
+            "fallback_steps": int(offline_fallback),
+            "unplaced_steps": int(offline_unplaced),
             "failure_penalty": float(offline_fail_penalty),
             "objective_penalized": offline_objective_penalized,
         },
@@ -133,13 +133,13 @@ def _build_run_summary(
             "status": online_info.status,
             "objective": float(online_info.total_objective),
             "runtime": float(online_info.runtime),
-            "fallback_items": int(online_info.fallback_items),
-            "evicted_offline": int(online_info.evicted_offline),
-            "unplaced_items": int(online_unplaced),
+            "fallback_steps": int(online_info.fallback_steps),
+            "evicted_offline_steps": int(online_info.evicted_offline_steps),
+            "unplaced_steps": int(online_unplaced),
             "failure_penalty": float(online_fail_penalty),
             "objective_penalized": online_objective_penalized,
         },
-        "final_items_in_fallback": int(final_fallback),
+        "final_steps_in_fallback": int(final_fallback),
         "total_objective_penalized": total_objective_penalized,
         "slack": {
             "enforce_slack": bool(cfg.slack.enforce_slack),
@@ -152,157 +152,134 @@ def _build_run_summary(
     return summary
 
 
-def run_eval(
+def _solve_offline(
     cfg: Config,
-    *,
+    instance: Any,
     offline_solver_cls: Type[OfflineMILPSolver],
-    online_policy_cls: Type[BaseOnlinePolicy],
-    seeds: List[int],
-    M_onl: Optional[int],
-    offline_solver_name: Optional[str] = None,
-    online_policy_name: Optional[str] = None,
-) -> Dict[str, Any]:
-    runs: List[Dict[str, Any]] = []
-    offline_util_means: List[float] = []
-    track_offline_util = bool(getattr(cfg.eval, "track_offline_util_for_binpacking", False))
-    offline_fail_statuses = {"INFEASIBLE", "INF_OR_UNBD", "UNBOUNDED"}
-    online_fail_statuses = {"INFEASIBLE"}
+) -> tuple[Any, Any]:
+    offline_solver = offline_solver_cls(cfg)
+    # we have this check as some bp specific offline algos dont compute from A,b,c and need the solve method instead of solve_from_data
+    if hasattr(offline_solver, "solve_from_data"):
+        data = build_offline_milp_data(instance, cfg)
+        warm_start = None
+        if getattr(cfg.solver, "use_warm_start", False) and hasattr(
+            offline_solver, "_generate_warm_start"
+        ):
+            warm_start = offline_solver._generate_warm_start(instance)
+        return offline_solver.solve_from_data(data, warm_start=warm_start)
+    return offline_solver.solve(instance)
 
 
-
-
-    for seed in seeds:
-        set_global_seed(seed)
-        instance = generate_instance_with_online(cfg, seed=seed, M_onl=M_onl)
-        offline_solver = offline_solver_cls(cfg)
-        # the following check is here because we have some binpacking specific offline algos here in the generic/pipeline_registry.py
-        # These do not have a solve_from_data method (working just on A,b,c) but work on instance (A_cap, b, ...) for simplicity.
-        if hasattr(offline_solver, "solve_from_data"):
-            data = build_offline_milp_data(instance, cfg)
-            warm_start = None
-            if getattr(cfg.solver, "use_warm_start", False) and hasattr(
-                offline_solver, "_generate_warm_start"
-            ):
-                warm_start = offline_solver._generate_warm_start(instance)
-            offline_state, offline_info = offline_solver.solve_from_data(
-                data, warm_start=warm_start
-            )
-        else:
-            offline_state, offline_info = offline_solver.solve(instance)
-
-        per_bin_util: List[float] | None = None
-        if track_offline_util:
-            if instance.n <= 0 or instance.m % instance.n != 0:
-                raise ValueError(
-                    f"track_offline_util_for_binpacking expects m = n * d. "
-                    f"Got n={instance.n}, m={instance.m}."
-                )
-            b_eff = np.asarray(
-                effective_capacity(instance.b, cfg.slack.enforce_slack, cfg.slack.fraction),
-                dtype=float,
-            )
-            load = np.asarray(offline_state.load, dtype=float)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                util = np.where(b_eff > 0, load / b_eff, np.nan)
-            d = instance.m // instance.n
-            util_bins = util.reshape(instance.n, d)
-            per_bin_mean = np.nanmean(util_bins, axis=1)
-            offline_util_means.append(float(np.nanmean(per_bin_mean)))
-            per_bin_util = per_bin_mean.astype(float).tolist()
-
-        policy_path = online_policy_name
-        if policy_path is None:
-            policy_path = f"{online_policy_cls.__module__}.{online_policy_cls.__name__}"
-        policy_kwargs: Dict[str, Any] = {}
-        if policy_path and online_policy_needs_prices(policy_path):
-            if policy_path == ONLINE_SIM_DUAL:
-                from generic.online.generic_pricing import compute_prices
-            
-
-            price_path_str = online_policy_price_path(policy_path)
-            if price_path_str is None:
-                raise ValueError(f"No price output path configured for {policy_path}")
-            price_path = Path(price_path_str)
-            # Offset the seed to ensure pricing uses a different online sample.
-            price_seed = seed + 10000
-            price_samples = 1
-            sample_online_caps = True
-            sample_online_costs = False
-            if policy_path == ONLINE_SIM_DUAL:
-                price_samples = max(1, int(cfg.sim_dual.saa_samples))
-                sample_online_caps = bool(cfg.sim_dual.sample_online_caps)
-                sample_online_costs = bool(cfg.sim_dual.sample_online_costs)
-            compute_prices(
-                cfg,
-                instance,
-                offline_state,
-                price_path,
-                sample_online_caps=sample_online_caps,
-                sample_online_costs=sample_online_costs,
-                sample_seed=price_seed,
-                num_samples=price_samples,
-            )
-            policy_kwargs["price_path"] = price_path
-
-        if policy_kwargs:
-            try:
-                online_policy = online_policy_cls(cfg, **policy_kwargs)
-            except TypeError as exc:
-                raise ValueError(
-                    f"{online_policy_cls.__name__} does not accept price_path but "
-                    f"pricing was requested for policy '{policy_path}'."
-                ) from exc
-        else:
-            online_policy = online_policy_cls(cfg)
-        online_solver = OnlineSolver(cfg, online_policy)
-        final_state, online_info = online_solver.run(instance, offline_state)
-
-        penalty_per_item = float(getattr(cfg.costs, "fail_penalty_per_item", 0.0))
-        penalty_scale = float(getattr(cfg.costs, "fail_penalty_scale", 1.0))
-        penalty_per_item *= penalty_scale
-
-        offline_unplaced = 0
-        online_unplaced = 0
-        offline_fail_penalty = 0.0
-        online_fail_penalty = 0.0
-        if penalty_per_item > 0:
-            if offline_info.status in offline_fail_statuses:
-                offline_unplaced = max(0, len(instance.offline_items) - len(offline_state.assigned_action))
-                offline_fail_penalty = penalty_per_item * offline_unplaced
-            if online_info.status in online_fail_statuses:
-                online_unplaced = max(0, len(instance.online_items) - len(online_info.decisions))
-                online_fail_penalty = penalty_per_item * online_unplaced
-
-        offline_obj_base = float(offline_info.obj_value)
-        if not np.isfinite(offline_obj_base):
-            offline_obj_base = 0.0
-        offline_obj_pen = offline_obj_base + offline_fail_penalty
-        online_obj_pen = float(online_info.total_objective) + online_fail_penalty
-        total_obj_pen = offline_obj_pen + online_obj_pen
-
-        offline_fallback = state_utils.count_fallback_items(offline_state, instance)
-        final_fallback = state_utils.count_fallback_items(final_state, instance)
-
-        runs.append(
-            _build_run_summary(
-                seed,
-                cfg,
-                offline_info,
-                online_info,
-                offline_fallback,
-                final_fallback,
-                instance,
-                per_bin_util,
-                offline_unplaced=offline_unplaced,
-                online_unplaced=online_unplaced,
-                offline_fail_penalty=offline_fail_penalty,
-                online_fail_penalty=online_fail_penalty,
-                offline_objective_penalized=offline_obj_pen,
-                online_objective_penalized=online_obj_pen,
-                total_objective_penalized=total_obj_pen,
-            )
+def _compute_offline_util(
+    cfg: Config,
+    instance: Any,
+    offline_state: Any,
+) -> List[float] | None:
+    if not bool(getattr(cfg.eval, "track_offline_util_for_binpacking", False)):
+        return None
+    if instance.n <= 0 or instance.m % instance.n != 0:
+        raise ValueError(
+            f"track_offline_util_for_binpacking expects m = n * d. "
+            f"Got n={instance.n}, m={instance.m}."
         )
+    b_eff = np.asarray(
+        effective_capacity(instance.b, cfg.slack.enforce_slack, cfg.slack.fraction),
+        dtype=float,
+    )
+    load = np.asarray(offline_state.load, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        util = np.where(b_eff > 0, load / b_eff, np.nan)
+    d = instance.m // instance.n
+    util_bins = util.reshape(instance.n, d)
+    per_bin_mean = np.nanmean(util_bins, axis=1)
+    return per_bin_mean.astype(float).tolist()
 
+
+def _compute_prices_if_needed(
+    cfg: Config,
+    policy_path: str,
+    instance: Any,
+    offline_state: Any,
+    seed: int,
+) -> Path | None:
+    if not policy_path or not online_policy_needs_prices(policy_path):
+        return None
+    from generic.online.pricing import compute_prices
+
+    price_path_str = online_policy_price_path(policy_path)
+    if price_path_str is None:
+        raise ValueError(f"No price output path configured for {policy_path}")
+    price_path = Path(price_path_str)
+    price_seed = seed + 10000
+    price_samples = 1
+    sample_online_caps = True
+    sample_online_costs = False
+    if policy_path == ONLINE_SIM_DUAL:
+        price_samples = max(1, int(cfg.sim_dual.num_samples))
+        sample_online_caps = bool(cfg.sim_dual.sample_online_caps)
+        sample_online_costs = bool(cfg.sim_dual.sample_online_costs)
+    compute_prices(
+        cfg,
+        instance,
+        offline_state,
+        price_path,
+        sample_online_caps=sample_online_caps,
+        sample_online_costs=sample_online_costs,
+        sample_seed=price_seed,
+        num_samples=price_samples,
+    )
+    return price_path
+
+
+def _compute_penalties(
+    cfg: Config,
+    instance: Any,
+    offline_state: Any,
+    offline_info: Any,
+    online_info: Any,
+    offline_fail_statuses: set[str],
+    online_fail_statuses: set[str],
+) -> tuple[int, int, float, float, float, float, float]:
+    penalty_per_step = float(getattr(cfg.costs, "fail_penalty_per_item", 0.0))
+    penalty_scale = float(getattr(cfg.costs, "fail_penalty_scale", 1.0))
+    penalty_per_step *= penalty_scale
+
+    offline_unplaced = 0
+    online_unplaced = 0
+    offline_fail_penalty = 0.0
+    online_fail_penalty = 0.0
+    if penalty_per_step > 0:
+        if offline_info.status in offline_fail_statuses:
+            offline_unplaced = max(0, len(instance.offline_steps) - len(offline_state.assigned_option))
+            offline_fail_penalty = penalty_per_step * offline_unplaced
+        if online_info.status in online_fail_statuses:
+            online_unplaced = max(0, len(instance.online_steps) - len(online_info.decisions))
+            online_fail_penalty = penalty_per_step * online_unplaced
+
+    offline_obj_base = float(offline_info.obj_value)
+    if not np.isfinite(offline_obj_base):
+        offline_obj_base = 0.0
+    offline_obj_pen = offline_obj_base + offline_fail_penalty
+    online_obj_pen = float(online_info.total_objective) + online_fail_penalty
+    total_obj_pen = offline_obj_pen + online_obj_pen
+    return (
+        offline_unplaced,
+        online_unplaced,
+        offline_fail_penalty,
+        online_fail_penalty,
+        offline_obj_pen,
+        online_obj_pen,
+        total_obj_pen,
+    )
+
+
+def _aggregate_runs(
+    runs: List[Dict[str, Any]],
+    *,
+    offline_fail_statuses: set[str],
+    online_fail_statuses: set[str],
+    include_offline_util: bool,
+) -> Dict[str, Any]:
     offline_obj = [run["offline"]["objective"] for run in runs]
     offline_runtime = [run["offline"]["runtime"] for run in runs]
     online_obj = [run["online"]["objective"] for run in runs]
@@ -354,9 +331,6 @@ def run_eval(
         per_seed.append(entry)
 
     summary = {
-        "seed_count": len(seeds),
-        "offline_solver": offline_solver_name,
-        "online_policy": online_policy_name,
         "offline_statuses": offline_statuses,
         "online_statuses": online_statuses,
         "per_seed": per_seed,
@@ -371,8 +345,116 @@ def run_eval(
             "online_failures": int(online_failures),
         },
     }
-    if track_offline_util:
+    if include_offline_util:
+        offline_util_means = [
+            run.get("offline_util_per_bin") for run in runs if "offline_util_per_bin" in run
+        ]
+        offline_util_means = [np.mean(v) for v in offline_util_means if v is not None]
         summary["aggregate"]["offline_utilization_mean"] = _mean_or_placeholder(offline_util_means)
+    return summary
+
+
+def run_eval(
+    cfg: Config,
+    *,
+    offline_solver_cls: Type[OfflineMILPSolver],
+    online_policy_cls: Type[BaseOnlinePolicy],
+    seeds: List[int],
+    T_onl: Optional[int],
+    offline_solver_name: Optional[str] = None,
+    online_policy_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    runs: List[Dict[str, Any]] = []
+    track_offline_util = bool(getattr(cfg.eval, "track_offline_util_for_binpacking", False))
+    offline_fail_statuses = {"INFEASIBLE", "INF_OR_UNBD", "UNBOUNDED"}
+    online_fail_statuses = {"INFEASIBLE"}
+    generator = BaseInstanceGenerator.from_config(cfg)
+
+    for seed in seeds:
+        set_global_seed(seed)
+        instance = generator.generate_full_instance(cfg, seed=seed, T_onl=T_onl)
+        offline_state, offline_info = _solve_offline(cfg, instance, offline_solver_cls)
+
+        per_bin_util = _compute_offline_util(cfg, instance, offline_state)
+
+        policy_path = online_policy_name
+        if policy_path is None:
+            policy_path = f"{online_policy_cls.__module__}.{online_policy_cls.__name__}"
+        price_path = _compute_prices_if_needed(
+            cfg,
+            policy_path,
+            instance,
+            offline_state,
+            seed,
+        )
+
+        if price_path is not None:
+            try:
+                online_policy = online_policy_cls(cfg, price_path=price_path)
+            except TypeError as exc:
+                raise ValueError(
+                    f"{online_policy_cls.__name__} does not accept price_path but "
+                    f"pricing was requested for policy '{policy_path}'."
+                ) from exc
+        else:
+            online_policy = online_policy_cls(cfg)
+        online_solver = OnlineSolver(cfg, online_policy)
+        final_state, online_info = online_solver.run(instance, offline_state)
+
+        (
+            offline_unplaced,
+            online_unplaced,
+            offline_fail_penalty,
+            online_fail_penalty,
+            offline_obj_pen,
+            online_obj_pen,
+            total_obj_pen,
+        ) = _compute_penalties(
+            cfg,
+            instance,
+            offline_state,
+            offline_info,
+            online_info,
+            offline_fail_statuses,
+            online_fail_statuses,
+        )
+
+        offline_fallback = state_utils.count_fallback_steps(offline_state, instance)
+        final_fallback = state_utils.count_fallback_steps(final_state, instance)
+
+        runs.append(
+            _build_run_summary(
+                seed,
+                cfg,
+                offline_info,
+                online_info,
+                offline_fallback,
+                final_fallback,
+                instance,
+                per_bin_util,
+                offline_unplaced=offline_unplaced,
+                online_unplaced=online_unplaced,
+                offline_fail_penalty=offline_fail_penalty,
+                online_fail_penalty=online_fail_penalty,
+                offline_objective_penalized=offline_obj_pen,
+                online_objective_penalized=online_obj_pen,
+                total_objective_penalized=total_obj_pen,
+            )
+        )
+
+    summary = _aggregate_runs(
+        runs,
+        offline_fail_statuses=offline_fail_statuses,
+        online_fail_statuses=online_fail_statuses,
+        include_offline_util=track_offline_util,
+    )
+    summary.update(
+        {
+            "seed_count": len(seeds),
+            "offline_solver": offline_solver_name,
+            "online_policy": online_policy_name,
+        }
+    )
     return summary
 
 
@@ -391,7 +473,7 @@ def main() -> None:
         offline_solver_cls=offline_solver_cls,
         online_policy_cls=online_policy_cls,
         seeds=seeds,
-        M_onl=args.M_onl,
+        T_onl=args.T_onl,
         offline_solver_name=args.offline_solver,
         online_policy_name=args.online_policy,
     )
