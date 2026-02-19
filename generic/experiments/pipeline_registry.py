@@ -12,24 +12,11 @@ OFFLINE_UTILIZATION = "binpacking.offline.policies.utilization_priced.Utilizatio
 # Online
 ONLINE_ROLLING_MILP = "generic.online.policies.RollingHorizonMILPPolicy"
 ONLINE_CABF = "binpacking.online.policies.cost_best_fit.CostAwareBestFitOnlinePolicy"
+# Legacy policy (kept for reference, not used in default pipelines)
 ONLINE_SIM_BASE = "binpacking.online.policies.sim_base.SimBasePolicy"
 ONLINE_SIM_DUAL = "generic.online.policies.SimDualPolicy"
 ONLINE_DYNAMIC_LEARNING = "binpacking.online.policies.dynamic_learning.DynamicLearningPolicy"
 ONLINE_PRIMAL_DUAL = "generic.online.policies.PrimalDualPolicy"
-# SimBase not tested (-> legacy / replaced by SimDual)
-ONLINE_POLICIES_NEED_PRICES = {ONLINE_SIM_BASE, ONLINE_SIM_DUAL}  # use generic/online/pricing.py
-
-
-def online_policy_needs_prices(policy_path: str) -> bool:
-    return policy_path in ONLINE_POLICIES_NEED_PRICES
-
-
-def online_policy_price_path(policy_path: str) -> str | None:
-    if policy_path == ONLINE_SIM_BASE:
-        return "outputs/binpacking/results/sim_base.json"
-    if policy_path == ONLINE_SIM_DUAL:
-        return "outputs/generic/results/sim_dual.json"
-    return None
 
 
 @dataclass(frozen=True)

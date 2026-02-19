@@ -38,14 +38,16 @@ feasibility:
 costs:
   assign_beta: [2.0, 5.0] # beta distribution for assignment costs
   assign_bounds: [1.0, 5.0] # lower/upper bounds for assignment costs
+  observe_future_online_costs: true # if false, policies/pricing must not use realized future online costs
   huge_fallback: 7.5 # fallback cost
 
   reassignment_penalty: 7.0
   penalty_mode: "per_item"     # could integrate switch to 'per_usage'
   # or dependent on usage
   per_usage_scale: 10.0 # only active if penalty_mode is per_usage
-  fail_penalty_per_item: 7 # per unplaced step penalty when a phase fails | makes sense when fallback_allowed is False for at least one phase, bc. then it could fail (otherwise cant bc. fallback always feasible)
+  fail_penalty_per_item: 7 # per unplaced step penalty when a phase fails | makes sense when fallback_allowed is False for at least one phase, bc. then it could fail
   fail_penalty_scale: 1.0 # multiplier on fail_penalty_per_item
+  stop_online_on_first_failure: true # if false, continue after an unplaced online step and penalize unplaced steps at evaluation
 
 stoch:
   horizon_dist: "fixed" # distribution of the numnber of online steps T_onl (for later possible implementation)
@@ -78,23 +80,27 @@ dla:
   output_dir: "outputs/generic/results/dla"
   min_phase_len: 25       # optional lower bound on phase length
   use_offline_slack: true
+  lambda0_init: "zero"    # "zero" | "offline_util" | "sim_lp"
 
-sim_dual:
+pricing_sim:
   num_samples: 10
-  sample_online_caps: true # if true, sample online A_t^{cap} and feasibility for SAA
-  sample_online_costs: false # if true, sample online costs; else use realized c_t
+  sample_online_caps: true # if true, sample online A_t^{cap} and feasibility for simulation
+                          # however if observe_future_online_costs = false, then will be resampled either way (even if false here, so overrides it)
+rolling_milp:
+  rollout_mode: "single" # "single" | "batch"
+  num_rollouts: 100 # used only when rollout_mode == "batch"
 
 primal_dual:
-  eta_mode: "sqrt"    # "constant" | "linear" | "sqrt" | "exponential"
-  eta0: 0.05
+  eta_mode: "constant"    # "constant" | "linear" | "sqrt" | "exponential"
+  eta0: 1e-05
   eta_decay: 0.0          # linear/exponential decay rate
   eta_min: 0.0            # floor for linear/exponential
-  normalize_update: true  # scale updates by relative capacity usage
+  normalize_update: false  # scale updates by relative capacity usage
   normalize_costs: false   # divide costs by a scale factor
-  use_remaining_capacity_target: false # target remaining capacity / remaining steps
+  use_remaining_capacity_target: true # target remaining capacity / remaining steps
   cost_scale_mode: "assign_mean" # "assign_mean" | "assign_bounds"
   cost_scale_min: 1e-8
-
+  lambda0_init: "sim_lp" # "offline_util" | "sim_lp" | "zero"
 
 eval:
   seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]

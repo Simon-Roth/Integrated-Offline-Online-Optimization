@@ -75,22 +75,27 @@ class CostConfig:
     Cost model for assignments and evictions.
     - assign_beta: Beta distribution parameters for assignment costs
     - assign_bounds: lower/upper bounds applied to assignment costs
+    - observe_future_online_costs: if True, policies may use realized future online costs
     - huge_fallback: large fallback cost to ensure feasibility but discourage use
     - reassignment_penalty: base penalty for evicting an OFFLINE step (per default PER-ITEM)
     - penalty_mode: 'per_item' | 'per_usage'  (per-step penalty, I kept "item" name for compatibility (instead of "step"))
     - per_usage_scale: if penalty_mode == 'per_usage', use penalty = per_usage_scale * ||A_t^{cap}||_1
     - fail_penalty_per_item: penalty per unplaced step when a phase fails
     - fail_penalty_scale: multiplier applied to fail_penalty_per_item
+    - stop_online_on_first_failure: if True, stop online processing at first unplaced step;
+      if False, continue and treat later steps as usual
     """
     base_assign_range: Tuple[float, float] = (1.0, 5.0)
     assign_beta: Tuple[float, float] = (2.0, 5.0)
     assign_bounds: Tuple[float, float] = (1.0, 5.0)
+    observe_future_online_costs: bool = True
     huge_fallback: float = 7.5
     reassignment_penalty: float = 7.0
     penalty_mode: str = "per_item"     # or "per_usage"
     per_usage_scale: float = 10.0     # used only if penalty_mode == "per_usage"
     fail_penalty_per_item: float = 7.0
     fail_penalty_scale: float = 1.0
+    stop_online_on_first_failure: bool = True
 
 @dataclass
 class StochasticConfig:
@@ -140,24 +145,35 @@ class DLAConfig:
     - output_dir: directory where per-run DLA logs are stored
     - min_phase_len: optional lower bound on phase length to avoid tiny intervals
     - use_offline_slack: if True, respect cfg.slack settings when building residual LPs
+    - lambda0_init: initial price vector before first phase update
+      ("zero" | "offline_util" | "sim_lp")
     """
     epsilon: float = 0.01
     log_prices: bool = False
     output_dir: str = "outputs/generic/results/dla"
     min_phase_len: int = 25
     use_offline_slack: bool = True
+    lambda0_init: str = "zero"
 
 @dataclass
-class SimDualConfig:
+class PricingSimulationConfig:
     """
-    Controls simulation settings for SimDual pricing.
+    Shared simulation settings for sampled LP pricing.
     - num_samples: number of samples used (>=1)
-    - sample_online_caps: if True, sample online A_t^{cap} (and feasibility (compatability))
-    - sample_online_costs: if True, sample online costs as well (else use realized c_t)
+    - sample_online_caps: if True, sample online A_t^{cap} and feasibility
     """
     num_samples: int = 10
     sample_online_caps: bool = True
-    sample_online_costs: bool = False
+
+@dataclass
+class RollingMILPConfig:
+    """
+    Rolling-horizon MILP controls.
+    - rollout_mode: "single" | "batch"
+    - num_rollouts: number of sampled rollouts in batch mode (>=1)
+    """
+    rollout_mode: str = "single"
+    num_rollouts: int = 100
 
 @dataclass
 class PrimalDualConfig:
@@ -172,6 +188,7 @@ class PrimalDualConfig:
     - use_remaining_capacity_target: if True, target remaining capacity / remaining steps
     - cost_scale_mode: "assign_mean" | "assign_bounds"
     - cost_scale_min: lower bound for cost scale to avoid divide-by-zero
+    - lambda0_init: "offline_util" | "sim_lp" | "zero"
     """
     eta_mode: str = "sqrt"
     eta0: float = 0.05
@@ -182,6 +199,7 @@ class PrimalDualConfig:
     use_remaining_capacity_target: bool = False
     cost_scale_mode: str = "assign_mean"
     cost_scale_min: float = 1e-8
+    lambda0_init: str = "offline_util"
 
 @dataclass
 class SolverConfig:
@@ -230,7 +248,8 @@ class Config:
     slack: SlackConfig
     util_pricing: UtilizationPricingConfig
     dla: DLAConfig
-    sim_dual: SimDualConfig
+    pricing_sim: PricingSimulationConfig
+    rolling_milp: RollingMILPConfig
     primal_dual: PrimalDualConfig
     solver: SolverConfig
     heuristics: HeuristicConfig
@@ -243,6 +262,7 @@ def load_config_data(data: dict) -> Config:
     """
     problem_data = dict(data["problem"])
     stoch_data = dict(data["stoch"])
+    pricing_sim_data = dict(data.get("pricing_sim", data.get("sim_dual", {})))
     return Config(
         problem=ProblemConfig(**problem_data),
         generation=GenerationConfig(**data.get("generation", {})),
@@ -253,7 +273,8 @@ def load_config_data(data: dict) -> Config:
         slack=SlackConfig(**data["slack"]),
         util_pricing=UtilizationPricingConfig(**data.get("util_pricing", {})),
         dla=DLAConfig(**data.get("dla", {})),
-        sim_dual=SimDualConfig(**data.get("sim_dual", {})),
+        pricing_sim=PricingSimulationConfig(**pricing_sim_data),
+        rolling_milp=RollingMILPConfig(**data.get("rolling_milp", {})),
         primal_dual=PrimalDualConfig(**data.get("primal_dual", {})),
         solver=SolverConfig(**data.get("solver", {})),
         heuristics=HeuristicConfig(**data.get("heuristics", {})),

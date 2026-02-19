@@ -266,8 +266,8 @@ Located in `binpacking/online/policies/`:
 - `cost_best_fit.py`:
   chooses bin with lowest incremental cost (cost aware), tie-break by residual (best fit), two-pass (-> no eviction then eviction).
 - `sim_base.py`:
-  uses precomputed dual prices (lambda) to score options:
-  cost + lambda * usage. Fallback is handled by the solver.
+  legacy policy kept for reproducibility of older runs; it expects file-based
+  precomputed dual prices and is not used in default pipelines.
 - `dynamic_learning.py`:
   dynamic learning algorithm with phase schedule. Recomputes prices by solving
   a fractional LP on observed steps (scaled capacities).
@@ -277,19 +277,16 @@ Located in `binpacking/online/policies/`:
 ## Pricing modules
 
 ### `generic/online/pricing.py`
-Computes dual prices for sim_base / sim_dual (generic and binpacking):
+Computes sampled LP dual prices used by price-based policies:
 
 - uses the realized offline state to compute residual capacities,
 - builds a fractional LP for a sampled set of online steps (same horizon, new seed),
 - supports separate switches for sampling online A/feasibility vs. online costs:
-  - `cfg.sim_dual.sample_online_caps` controls resampling of A_t^{cap} and feasibility,
-  - `cfg.sim_dual.sample_online_costs` controls whether online costs are resampled or taken from the realized instance,
+  - `cfg.pricing_sim.sample_online_caps` controls resampling of A_t^{cap} and feasibility,
+  - `cfg.pricing_sim.sample_online_costs` controls whether online costs are resampled or taken from the realized instance,
 - allows fallback in the pricing LP (to guarantee successful computation) when a fallback option exists, penalized by `cfg.costs.huge_fallback`,
-- writes prices to the policy-specific path from `generic/experiments/pipeline_registry.py`
-  (e.g. `outputs/binpacking/results/sim_base.json` or `outputs/generic/results/sim_dual.json`).
-
-This is called per seed inside `generic/experiments/run_eval.py` when the
-online policy requires prices.
+- pricing is in-memory (`compute_resource_prices`), used by `SimDual`
+  and other policies that initialize prices from sampled LPs.
 
 ### Dynamic Learning pricing
 `dynamic_learning.py` has its own LP-based pricing for each phase. It also
@@ -305,7 +302,6 @@ Defines available offline solvers and online policies as import strings and
 registers the default pipelines. Provides:
 - `PipelineSpec` (name + offline solver + online policy).
 - `default_registry()` to build all combinations.
-- `online_policy_needs_prices(...)` to identify policies that need pricing.
 
 ### `generic/experiments/run_eval.py`
 Run a single pipeline across multiple seeds and output an aggregated JSON.
@@ -314,7 +310,6 @@ Flow:
 - load config,
 - generate instance (offline + online),
 - solve offline (MILP from A,b,c if solver supports `solve_from_data` (which is the case for our generic_solver, but e.g. nor for some binpacking-specific offline heuristics like UTIL as they do not work on A,b,c but Instance)),
-- compute prices if needed (sim_base),
 - run online solver,
 - aggregate results and write JSON to `outputs/generic/results`.
 
@@ -336,7 +331,7 @@ Key CLI args:
 ```
 python scripts/run_multiple_evals.py \
   --config configs/generic/generic.yaml \
-  --pipelines binpacking_milp+sim_base util+cost_best_fit \
+  --pipelines binpacking_milp+sim_dual util+cost_best_fit \
   --seeds 1 2 3 \
   --m-onl 100 \
   --compute-optimal

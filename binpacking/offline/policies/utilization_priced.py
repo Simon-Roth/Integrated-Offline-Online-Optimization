@@ -66,6 +66,9 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
             raise ValueError('Negative or infinite mean cost not fit for UtilDecreasing')
             avg_cost = 1.0
         cost_scale = avg_cost
+        # We keep lambda here dimensionless: costs are normalized by avg cost and volumes by capacity
+        # Relative pricing strength is tuned via update_rule/price_exponent/exp_rate
+        # Therefore lambda_scale = 1 (no effect), however, can also be set if one needs it
         lambda_scale = 1.0
         if self.cfg.util_pricing.vector_prices:
             price_cache = np.zeros((regular_options, d))

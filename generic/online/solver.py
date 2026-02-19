@@ -50,11 +50,17 @@ class OnlineSolver:
 
         # Work on a cloned state so the offline allocation remains intact.
         state = state_utils.clone_state(initial_state)
+        # Let the policy initialize per-instance runtime state once.
+        self.policy.begin_instance(instance, state)
         # Cache A_t^{cap} lookups for all steps to speed up state updates.
         cap_lookup = state_utils.build_cap_lookup(instance)
         decisions: List[Decision] = []
         total_objective = 0.0
         eviction_events = 0
+        had_infeasible_step = False
+        stop_on_first_failure = bool(
+            getattr(self.cfg.costs, "stop_online_on_first_failure", True)
+        )
 
         start_time = time.perf_counter()
 
@@ -78,15 +84,18 @@ class OnlineSolver:
             if needs_fallback:
                 decision = self._fallback_decision(instance, step)
                 if decision is None:
-                    info = OnlineSolutionInfo(
-                        status="INFEASIBLE",
-                        runtime=time.perf_counter() - start_time,
-                        total_objective=total_objective,
-                        fallback_steps=state_utils.count_fallback_steps(state, instance),
-                        evicted_offline_steps=len(state.offline_evicted_steps),
-                        decisions=decisions,
-                    )
-                    return state, info
+                    had_infeasible_step = True
+                    if stop_on_first_failure:
+                        info = OnlineSolutionInfo(
+                            status="INFEASIBLE",
+                            runtime=time.perf_counter() - start_time,
+                            total_objective=total_objective,
+                            fallback_steps=state_utils.count_fallback_steps(state, instance),
+                            evicted_offline_steps=len(state.offline_evicted_steps),
+                            decisions=decisions,
+                        )
+                        return state, info
+                    continue
             # Apply the decision to the live state (load update + assignments).
             state_utils.apply_decision(
                 decision,
@@ -101,8 +110,9 @@ class OnlineSolver:
 
         runtime = time.perf_counter() - start_time
 
+        status = "INFEASIBLE" if had_infeasible_step else "COMPLETED"
         info = OnlineSolutionInfo(
-            status="COMPLETED",
+            status=status,
             runtime=runtime,
             total_objective=total_objective,
             fallback_steps=state_utils.count_fallback_steps(state, instance),

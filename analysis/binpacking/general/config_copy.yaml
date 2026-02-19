@@ -5,13 +5,16 @@ problem:
   b: [] # capacity vector b (length m). If empty, sample from b_mean/b_std
   b_mean: 1680 # 2500.0 # mean for sampling b when b is empty
   b_std: 20 # std for sampling b when b is empty
-  fallback_is_enabled: true # optional rejection option with high cost
+  fallback_is_enabled: true # optional rejection action with high cost
   fallback_allowed_offline: true # if true: offline steps may choose rejection
   fallback_allowed_online: true # if true: online steps may choose rejection
   allow_reassignment: false # if false: online policies/heuristics must not evict/reshuffle offline steps
 
+generation:
+  generator: "generic" # "generic" | "binpacking"
+
 cap_coeffs:
-  offline_beta: [3, 7] # beta distribution for A_off coefficients (binpacking: step size)
+  offline_beta: [3, 7] # beta distribution for A_off coefficients (binpacking: item size)
   offline_bounds: [30, 180] # bounds for A_off coefficients
   online_beta: [3, 7] # beta distribution for A_onl coefficients
   online_bounds: [30, 180] # bounds for A_onl coefficients
@@ -45,7 +48,7 @@ costs:
   fail_penalty_scale: 1.0 # multiplier on fail_penalty_per_item
 
 stoch:
-  horizon_dist: "fixed" # distribution of the number of online steps T_onl (for later possible implementation)
+  horizon_dist: "fixed" # distribution of the numnber of online steps T_onl (for later possible implementation)
   T_onl: 160 # if fixed, T_onl = T_onl
 
 slack:
@@ -76,10 +79,14 @@ dla:
   min_phase_len: 25       # optional lower bound on phase length
   use_offline_slack: true
 
-sim_dual:
+pricing_sim:
   num_samples: 10
-  sample_online_caps: true # if true, sample online A_t^{cap} and feasibility for SAA
+  sample_online_caps: true # if true, sample online A_t^{cap} and feasibility for simulation
   sample_online_costs: false # if true, sample online costs; else use realized c_t
+
+rolling_milp:
+  rollout_mode: "single" # "single" | "batch"
+  num_rollouts: 100 # used only when rollout_mode == "batch"
 
 primal_dual:
   eta_mode: "sqrt"    # "constant" | "linear" | "sqrt" | "exponential"
@@ -91,6 +98,7 @@ primal_dual:
   use_remaining_capacity_target: false # target remaining capacity / remaining steps
   cost_scale_mode: "assign_mean" # "assign_mean" | "assign_bounds"
   cost_scale_min: 1e-8
+  lambda0_init: "offline_util" # "offline_util" | "sim_lp" | "zero"
 
 
 eval:

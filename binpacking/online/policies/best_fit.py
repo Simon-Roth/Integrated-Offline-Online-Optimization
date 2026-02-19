@@ -31,6 +31,14 @@ class BestFitOnlinePolicy(BaseOnlinePolicy):
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
 
+    def begin_instance(
+        self,
+        instance: Instance,
+        initial_state: AssignmentState,
+    ) -> None:
+        # Stateless heuristic: nothing to initialize per instance.
+        return
+
     def select_action(
         self,
         step: StepSpec,

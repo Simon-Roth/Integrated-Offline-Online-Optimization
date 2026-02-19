@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Dict, List, Optional, Protocol, Sequence
 import json
@@ -15,6 +16,7 @@ from generic.data.generator_utils import (
     _ensure_row_feasible,
     _build_feas_constraints,
     _sample_feas_mask_by_option,
+    _sample_assignment_costs,
 )
 from generic.data.offline_milp_assembly import build_offline_milp_data_from_arrays
 from generic.core.utils import (
@@ -31,12 +33,25 @@ from generic.online.policy_utils import (
     PolicyInfeasibleError,
     remaining_capacities,
 )
+from generic.online.pricing import compute_resource_prices
 
 
 class BaseOnlinePolicy(Protocol):
     """
     Interface that all online heuristics/solvers must implement.
     """
+
+    def begin_instance(
+        self,
+        instance: Instance,
+        initial_state: AssignmentState,
+    ) -> None:
+        """
+        Optional lifecycle hook called once before processing online steps.
+
+        Stateful policies can initialize per-instance runtime data here.
+        """
+        ...
 
     def select_action(
         self,
@@ -87,8 +102,10 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         mip_gap: float = 0.01,
         threads: int = 0,
         log_to_console: bool = False,
+        pricing_sample_seed: int | None = None,
     ) -> None:
         self.cfg = cfg
+        self._pricing_sample_seed = pricing_sample_seed
         from generic.offline.solver import OfflineMILPSolver
 
         self._solver = OfflineMILPSolver(
@@ -107,19 +124,79 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         self._total_steps: int = 0
         self._t: int = 0
 
+    def begin_instance(
+        self,
+        instance: Instance,
+        initial_state: AssignmentState,
+    ) -> None:
+        # Initialize per-instance state once at the start of the online run.
+        self._instance_id = id(instance)
+        use_slack = bool(self.cfg.slack.enforce_slack and self.cfg.slack.apply_to_online)
+        slack_fraction = self.cfg.slack.fraction if use_slack else 0.0
+        caps_eff = np.asarray(
+            effective_capacity(instance.b, use_slack, slack_fraction),
+            dtype=float,
+        ).reshape(-1)
+        T = max(1, len(instance.online_steps))
+        self._effective_caps = caps_eff
+        self._cap_per_step = caps_eff / float(T)
+        self._total_steps = T
+        if self.cfg.primal_dual.normalize_costs:
+            self._cost_scale = self._compute_cost_scale(instance, instance.n)
+            self._eta_scale = 1.0 / self._cost_scale
+        else:
+            self._cost_scale = 1.0
+            self._eta_scale = 1.0
+        self._t = 0
+
+        init_mode = str(self.cfg.primal_dual.lambda0_init).lower()
+        if init_mode == "offline_util":
+            load = np.asarray(initial_state.load, dtype=float).reshape(-1)
+            denom = np.where(caps_eff > 0.0, caps_eff, 1.0)
+            utilization = np.maximum(0.0, load / denom)
+            eta0 = self._eta_t() * self._eta_scale
+            offline_util_lambda = eta0 * utilization
+            self._lambda = offline_util_lambda
+        elif init_mode == "zero":
+            self._lambda = np.zeros_like(caps_eff)
+        elif init_mode == "sim_lp":
+            sim_prices = compute_resource_prices(
+                self.cfg,
+                instance,
+                initial_state,
+                log_to_console=False,
+                sample_online_caps=bool(self.cfg.pricing_sim.sample_online_caps),
+                sample_seed=self._pricing_sample_seed,
+                num_samples=max(1, int(self.cfg.pricing_sim.num_samples)),
+            ).reshape(-1)
+            if sim_prices.size != caps_eff.size:
+                raise ValueError(
+                    f"sim_lp warm-start price dimension mismatch: "
+                    f"{sim_prices.size} vs {caps_eff.size}"
+                )
+            # Keep price scale compatible with optional primal-dual cost normalization.
+            self._lambda = sim_prices * self._eta_scale
+        else:
+            raise ValueError(f"Unknown primal_dual.lambda0_init: {self.cfg.primal_dual.lambda0_init}")
+
     def select_action(
         self,
         step: StepSpec,
         state: AssignmentState,
         instance: Instance,
     ) -> Decision:
-        # Step 1-2: initialize duals and remaining capacities once per instance.
-        self._reset_if_needed(instance, state)
-        assert self._lambda is not None
-        assert self._cap_per_step is not None
-        assert self._effective_caps is not None
+        if (
+            self._instance_id != id(instance)
+            or self._lambda is None
+            or self._cap_per_step is None
+            or self._effective_caps is None
+        ):
+            raise RuntimeError(
+                "PrimalDualPolicy.begin_instance(instance, initial_state) must be called "
+                "before select_action."
+            )
 
-        # Step 3: observe A_t^{cap}, feasibility, and c_t (assignment costs).
+        # Step 1: observe A_t^{cap}, feasibility, and c_t (assignment costs).
         n = instance.n
         fallback_idx = instance.fallback_option_index
         cols = n + (1 if fallback_idx >= 0 else 0)
@@ -128,7 +205,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         feas_rhs = np.asarray(step.feas_rhs, dtype=float)
         costs = current_cost_row(self.cfg, instance, step.step_id, cols).reshape(1, -1)
 
-        # Step 4: solve the price-aware MILP for this single arrival.
+        # Step 2: solve the price-aware MILP for this single arrival.
         capacities = remaining_capacities(
             self.cfg,
             state,
@@ -146,7 +223,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
             fallback_idx,
         )
 
-        # Step 5-7: apply x_t (the OnlineSolver updates state/load), then update lambda.
+        # Step 3-5: apply x_t (the OnlineSolver updates state/load), then update lambda.
         self._update_duals(assigned_option, cap_matrix, n, capacities)
 
         incremental_cost = lookup_assignment_cost(self.cfg, instance, step.step_id, assigned_option)
@@ -156,32 +233,6 @@ class PrimalDualPolicy(BaseOnlinePolicy):
             reassigned_offline_steps=[],
             incremental_cost=incremental_cost,
         )
-
-    # Initialize per-instance state (lambda, caps, scaling).
-    def _reset_if_needed(self, instance: Instance, state: AssignmentState) -> None:
-        # Reset per-instance state so prices/counters don't leak across runs.
-        if self._instance_id == id(instance) and self._lambda is not None:
-            return
-        self._instance_id = id(instance)
-        use_slack = bool(self.cfg.slack.enforce_slack and self.cfg.slack.apply_to_online)
-        slack_fraction = self.cfg.slack.fraction if use_slack else 0.0
-        caps_eff = np.asarray(
-            effective_capacity(instance.b, use_slack, slack_fraction),
-            dtype=float,
-        ).reshape(-1)
-        T = max(1, len(instance.online_steps))
-        self._effective_caps = caps_eff
-        self._cap_per_step = caps_eff / float(T)
-        self._total_steps = T
-        self._cost_scale = self._compute_cost_scale(instance, instance.n)
-        self._eta_scale = 1.0 / self._cost_scale if self.cfg.primal_dual.normalize_costs else 1.0
-        self._t = 0
-
-        load = np.asarray(state.load, dtype=float).reshape(-1)
-        denom = np.where(caps_eff > 0.0, caps_eff, 1.0)
-        utilization = np.maximum(0.0, load / denom)
-        eta0 = self._eta_t() * self._eta_scale
-        self._lambda = eta0 * utilization
 
     # Apply optional cost scaling and add the price term to costs.
     def _price_aware_costs(
@@ -287,46 +338,72 @@ class PrimalDualPolicy(BaseOnlinePolicy):
             lo, hi = self.cfg.costs.assign_bounds
             return max(min_scale, 0.5 * (float(lo) + float(hi)))
         if mode == "assign_mean":
+            if n <= 0:
+                return max(min_scale, 1.0)
+            if not bool(self.cfg.costs.observe_future_online_costs):
+                alpha_cost, beta_cost = self.cfg.costs.assign_beta
+                lo_cost, hi_cost = self.cfg.costs.assign_bounds
+                denom = float(alpha_cost) + float(beta_cost)
+                if denom <= 0.0:
+                    return max(min_scale, 1.0)
+                expected = float(lo_cost) + (float(alpha_cost) / denom) * (
+                    float(hi_cost) - float(lo_cost)
+                )
+                return max(min_scale, expected)
             costs = instance.costs.assignment_costs
             if costs is None or not costs.size or n <= 0:
                 return max(min_scale, 1.0)
-        online_step_ids = [step_spec.step_id for step_spec in instance.online_steps]
-        if not online_step_ids:
-            return max(min_scale, 1.0)
-        values = costs[np.asarray(online_step_ids, dtype=int), :n].reshape(-1)
-        if values.size == 0:
-            return max(min_scale, 1.0)
-        return max(min_scale, float(np.mean(values)))
+            online_step_ids = [step_spec.step_id for step_spec in instance.online_steps]
+            if not online_step_ids:
+                return max(min_scale, 1.0)
+            values = costs[np.asarray(online_step_ids, dtype=int), :n].reshape(-1)
+            if values.size == 0:
+                return max(min_scale, 1.0)
+            return max(min_scale, float(np.mean(values)))
         raise ValueError(f"Unknown cost_scale_mode: {self.cfg.primal_dual.cost_scale_mode}")
 
 
 class SimDualPolicy(BaseOnlinePolicy):
     """
-    Price-aware MILP policy with fixed dual prices (no online updates).
+    Static-price variant of primal-dual:
+    - initialize lambda via sim_lp pricing
+    - keep prices fixed (no dual updates)
     """
 
     def __init__(
         self,
         cfg: Config,
         *,
-        price_path: Path = Path("outputs/generic/results/sim_dual.json"),
         time_limit: int = 60,
         mip_gap: float = 0.01,
         threads: int = 0,
         log_to_console: bool = False,
+        pricing_sample_seed: int | None = None,
     ) -> None:
-        self.cfg = cfg
-        self._price_path = price_path
-        self._lambda = self._load_prices(price_path)
-        from generic.offline.solver import OfflineMILPSolver
-
-        self._solver = OfflineMILPSolver(
-            cfg,
+        sim_cfg = copy.deepcopy(cfg)
+        # Force PrimalDual behavior equivalent to fixed SimDual prices.
+        sim_cfg.primal_dual.lambda0_init = "sim_lp"
+        sim_cfg.primal_dual.eta_mode = "constant"
+        sim_cfg.primal_dual.eta0 = 0.0
+        sim_cfg.primal_dual.eta_decay = 0.0
+        sim_cfg.primal_dual.eta_min = 0.0
+        sim_cfg.primal_dual.normalize_update = False
+        sim_cfg.primal_dual.normalize_costs = False
+        self._delegate = PrimalDualPolicy(
+            sim_cfg,
             time_limit=time_limit,
             mip_gap=mip_gap,
             threads=threads,
             log_to_console=log_to_console,
+            pricing_sample_seed=pricing_sample_seed,
         )
+
+    def begin_instance(
+        self,
+        instance: Instance,
+        initial_state: AssignmentState,
+    ) -> None:
+        self._delegate.begin_instance(instance, initial_state)
 
     def select_action(
         self,
@@ -334,97 +411,7 @@ class SimDualPolicy(BaseOnlinePolicy):
         state: AssignmentState,
         instance: Instance,
     ) -> Decision:
-        # Step 1: observe A_t^{cap}, feasibility, and c_t (assignment costs)
-        n = instance.n
-        fallback_idx = instance.fallback_option_index
-        cols = n + (1 if fallback_idx >= 0 else 0)
-        cap_matrix = np.asarray(step.cap_matrix, dtype=float)
-        feas_matrix = np.asarray(step.feas_matrix, dtype=float)
-        feas_rhs = np.asarray(step.feas_rhs, dtype=float)
-        costs = current_cost_row(self.cfg, instance, step.step_id, cols).reshape(1, -1)
-
-        # Step 2: add fixed dual prices to the objective and solve the one-step MILP.
-        capacities = remaining_capacities(self.cfg, state, instance)
-        costs = self._price_aware_costs(costs, cap_matrix, n)
-        assigned_option = self._solve_price_aware_milp(
-            cap_matrix,
-            costs,
-            feas_matrix,
-            feas_rhs,
-            capacities,
-            fallback_idx,
-        )
-
-        incremental_cost = lookup_assignment_cost(self.cfg, instance, step.step_id, assigned_option)
-        return Decision(
-            placed_step=(step.step_id, int(assigned_option)),
-            evicted_offline_steps=[],
-            reassigned_offline_steps=[],
-            incremental_cost=incremental_cost,
-        )
-
-    # Load per-option dual prices from JSON.
-    def _load_prices(self, price_path: Path) -> dict[int, np.ndarray]:
-        with open(price_path) as handle:
-            data = json.load(handle)
-        prices = {}
-        for key, value in data.get("prices", {}).items():
-            if isinstance(value, list):
-                prices[int(key)] = np.asarray(value, dtype=float)
-            else:
-                prices[int(key)] = np.asarray([float(value)], dtype=float)
-        return prices
-
-    # Add lambda^T A_t^cap to assignment costs (regular options only).
-    def _price_aware_costs(self, costs: np.ndarray, cap_matrix: np.ndarray, n: int) -> np.ndarray:
-        if n <= 0:
-            return costs
-        cap = np.asarray(cap_matrix, dtype=float)
-        price_terms = np.zeros((n,), dtype=float)
-        for option_id in range(n):
-            lam = self._lambda.get(option_id)
-            if lam is None:
-                continue
-            lam_vec = lam.reshape(-1)
-            col = cap[:, option_id].reshape(-1)
-            if lam_vec.size == 1 and col.size > 1:
-                lam_vec = np.full((col.size,), float(lam_vec[0]))
-            if lam_vec.size != col.size:
-                raise ValueError(
-                    f"Price vector dimension mismatch for option {option_id}: "
-                    f"{lam_vec.size} vs {col.size}"
-                )
-            price_terms[option_id] = float(np.dot(lam_vec, col))
-        costs[0, :n] = costs[0, :n] + price_terms
-        return costs
-
-    # Solve the one-step price-aware MILP and return the chosen option.
-    def _solve_price_aware_milp(
-        self,
-        cap_matrix: np.ndarray,
-        costs: np.ndarray,
-        feas_matrix: np.ndarray,
-        feas_rhs: np.ndarray,
-        capacities: np.ndarray,
-        fallback_idx: int,
-    ) -> int:
-        data = build_offline_milp_data_from_arrays(
-            cap_matrices=cap_matrix.reshape(1, *cap_matrix.shape),
-            costs=costs,
-            feas_matrices=[feas_matrix],
-            feas_rhs=[feas_rhs],
-            b=capacities,
-            fallback_idx=fallback_idx,
-            slack_enforce=False,
-            slack_fraction=0.0,
-        )
-        rh_state, rh_info = self._solver.solve_from_data(data)
-        if not rh_info.feasible:
-            raise PolicyInfeasibleError("SimDual MILP has no feasible solution.")
-        assigned_option = rh_state.assigned_option.get(0)
-        if assigned_option is None:
-            raise PolicyInfeasibleError("SimDual MILP did not assign the current step.")
-        return int(assigned_option)
+        return self._delegate.select_action(step, state, instance)
 
 
 class RollingHorizonMILPPolicy(BaseOnlinePolicy):
@@ -445,6 +432,14 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
         self.cfg = cfg
         self._rng = make_rng(seed)
         self._generator = BaseInstanceGenerator.from_config(cfg)
+        self._rollout_mode = str(cfg.rolling_milp.rollout_mode).lower()
+        if self._rollout_mode not in {"single", "batch"}:
+            raise ValueError(
+                f"Unknown rolling_milp.rollout_mode: {cfg.rolling_milp.rollout_mode}"
+            )
+        self._num_rollouts = int(cfg.rolling_milp.num_rollouts)
+        if self._num_rollouts < 1:
+            raise ValueError("rolling_milp.num_rollouts must be >= 1.")
         from generic.offline.solver import OfflineMILPSolver
 
         self._solver = OfflineMILPSolver(
@@ -455,51 +450,41 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
             log_to_console=log_to_console,
         )
 
+    def begin_instance(
+        self,
+        instance: Instance,
+        initial_state: AssignmentState,
+    ) -> None:
+        # Stateless across instances apart from RNG progression
+        return
+
     def select_action(
         self,
         step: StepSpec,
         state: AssignmentState,
         instance: Instance,
     ) -> Decision:
-        # Step 1: observe A_t and remaining capacity (from state).
+        # Step 1: observe A_t and remaining capacity (from state)
         idx = self._online_index(step, instance)
         remaining = max(0, len(instance.online_steps) - idx - 1)
 
         n = instance.n
         fallback_idx = instance.fallback_option_index
         cols = n + (1 if fallback_idx >= 0 else 0)
+        capacities = remaining_capacities(self.cfg, state, instance)
 
-        # Step 2: sample future A_tau for tau > t and build the remaining MILP.
-        cap_matrices = self._build_cap_matrices(step, instance, remaining)
-        costs = self._build_costs(instance, step.step_id, remaining, n, cols, online_index=idx)
-        feas_matrices, feas_rhs = self._build_feasible(
+        # Step 2-3: solve one rollout (single mode) or sample a batch of rollouts.
+        assigned_option = self._select_assigned_option(
             step,
+            instance,
             remaining,
             n,
             cols,
             fallback_idx,
+            online_index=idx,
+            capacities=capacities,
         )
-        capacities = remaining_capacities(self.cfg, state, instance)
-
-        # Step 3: solve the remaining-horizon MILP.
-        data = build_offline_milp_data_from_arrays(
-            cap_matrices=cap_matrices,
-            costs=costs,
-            feas_matrices=feas_matrices,
-            feas_rhs=feas_rhs,
-            b=capacities,
-            fallback_idx=fallback_idx,
-            slack_enforce=False,
-            slack_fraction=0.0,
-        )
-        rh_state, rh_info = self._solver.solve_from_data(data)
-        if not rh_info.feasible:
-            raise PolicyInfeasibleError("Rolling horizon MILP has no feasible solution.")
-
-        assigned_option = rh_state.assigned_option.get(0)
-        if assigned_option is None:
-            raise PolicyInfeasibleError("Rolling horizon MILP did not assign the current step.")
-        # Step 4-5: fix x_t (current step), OnlineSolver updates remaining capacity after applying.
+        # Step 4-5: fix x_t (current step), OnlineSolver updates remaining capacity after applying
         incremental_cost = lookup_assignment_cost(self.cfg, instance, step.step_id, assigned_option)
         return Decision(
             placed_step=(step.step_id, int(assigned_option)),
@@ -519,6 +504,133 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
                 f"Online step id {step.step_id} does not match instance ordering."
             )
         return idx
+
+    def _select_assigned_option(
+        self,
+        step: StepSpec,
+        instance: Instance,
+        remaining: int,
+        n: int,
+        cols: int,
+        fallback_idx: int,
+        *,
+        online_index: int,
+        capacities: np.ndarray,
+    ) -> int:
+        if self._rollout_mode == "single":
+            return self._solve_single_rollout(
+                step,
+                instance,
+                remaining,
+                n,
+                cols,
+                fallback_idx,
+                online_index=online_index,
+                capacities=capacities,
+            )
+        return self._solve_batch_rollouts(
+            step,
+            instance,
+            remaining,
+            n,
+            cols,
+            fallback_idx,
+            online_index=online_index,
+            capacities=capacities,
+        )
+
+    def _solve_single_rollout(
+        self,
+        step: StepSpec,
+        instance: Instance,
+        remaining: int,
+        n: int,
+        cols: int,
+        fallback_idx: int,
+        *,
+        online_index: int,
+        capacities: np.ndarray,
+    ) -> int:
+        cap_matrices = self._build_cap_matrices(step, instance, remaining)
+        costs = self._build_costs(instance, step.step_id, remaining, n, cols, online_index=online_index)
+        feas_matrices, feas_rhs = self._build_feasible(
+            step,
+            remaining,
+            n,
+            cols,
+            fallback_idx,
+        )
+        return self._solve_remaining_milp(
+            cap_matrices,
+            costs,
+            feas_matrices,
+            feas_rhs,
+            capacities,
+            fallback_idx,
+        )
+
+    def _solve_batch_rollouts(
+        self,
+        step: StepSpec,
+        instance: Instance,
+        remaining: int,
+        n: int,
+        cols: int,
+        fallback_idx: int,
+        *,
+        online_index: int,
+        capacities: np.ndarray,
+    ) -> int:
+        assigned_options: list[int] = []
+        for _ in range(self._num_rollouts):
+            try:
+                assigned = self._solve_single_rollout(
+                    step,
+                    instance,
+                    remaining,
+                    n,
+                    cols,
+                    fallback_idx,
+                    online_index=online_index,
+                    capacities=capacities,
+                )
+            except PolicyInfeasibleError:
+                continue
+            assigned_options.append(int(assigned))
+        if not assigned_options:
+            raise PolicyInfeasibleError(
+                "Rolling horizon MILP has no feasible solution across sampled batch rollouts."
+            )
+        values, counts = np.unique(np.asarray(assigned_options, dtype=int), return_counts=True)
+        probs = counts.astype(float) / float(np.sum(counts))
+        return int(self._rng.choice(values, p=probs))
+
+    def _solve_remaining_milp(
+        self,
+        cap_matrices: np.ndarray,
+        costs: np.ndarray,
+        feas_matrices: list[np.ndarray],
+        feas_rhs: list[np.ndarray],
+        capacities: np.ndarray,
+        fallback_idx: int,
+    ) -> int:
+        data = build_offline_milp_data_from_arrays(
+            cap_matrices=cap_matrices,
+            costs=costs,
+            feas_matrices=feas_matrices,
+            feas_rhs=feas_rhs,
+            b=np.asarray(capacities, dtype=float).copy(),
+            fallback_idx=fallback_idx,
+            slack_enforce=False,
+            slack_fraction=0.0,
+        )
+        rh_state, rh_info = self._solver.solve_from_data(data)
+        if not rh_info.feasible:
+            raise PolicyInfeasibleError("Rolling horizon MILP has no feasible solution.")
+        assigned_option = rh_state.assigned_option.get(0)
+        if assigned_option is None:
+            raise PolicyInfeasibleError("Rolling horizon MILP did not assign the current step.")
+        return int(assigned_option)
 
     # Stack current step A_t^{cap} with sampled future A_tau^{cap}.
     def _build_cap_matrices(self, step: StepSpec, instance: Instance, remaining: int) -> np.ndarray:
@@ -546,13 +658,19 @@ class RollingHorizonMILPPolicy(BaseOnlinePolicy):
         *,
         online_index: int,
     ) -> np.ndarray:
-        costs = np.zeros((1 + remaining, cols), dtype=float)
+        costs = np.full((1 + remaining, cols), self.cfg.costs.huge_fallback, dtype=float)
         costs[0] = current_cost_row(self.cfg, instance, step_id, cols)
         if remaining <= 0:
             return costs
-        future_steps = instance.online_steps[online_index + 1 : online_index + 1 + remaining]
-        for offset, future_step in enumerate(future_steps, start=1):
-            costs[offset] = current_cost_row(self.cfg, instance, future_step.step_id, cols)
+        if bool(self.cfg.costs.observe_future_online_costs):
+            future_steps = instance.online_steps[online_index + 1 : online_index + 1 + remaining]
+            for offset, future_step in enumerate(future_steps, start=1):
+                costs[offset] = current_cost_row(self.cfg, instance, future_step.step_id, cols)
+            return costs
+        sampled = _sample_assignment_costs(self.cfg, self._rng, remaining, n)
+        take = min(n, cols, sampled.shape[1])
+        if take > 0:
+            costs[1:, :take] = sampled[:, :take]
         return costs
 
     # Build feasibility rows for current + sampled steps.
@@ -594,6 +712,7 @@ class GenericDynamicLearningPolicy(BaseOnlinePolicy):
         self.price_path = Path(price_path) if price_path else None
 
         # Runtime state
+        self._instance_id: Optional[int] = None
         self._phase_idx: int = -1
         self._schedule: List[int] = []
         self._current_prices: Optional[np.ndarray] = None  # length m
@@ -604,15 +723,65 @@ class GenericDynamicLearningPolicy(BaseOnlinePolicy):
 
         self._milp_solver = OfflineMILPSolver(cfg)
 
+    def begin_instance(
+        self,
+        instance: Instance,
+        initial_state: AssignmentState,
+    ) -> None:
+        # Reset per-instance runtime state so no data leaks between runs.
+        self._instance_id = id(instance)
+        self._phase_idx = -1
+        self._schedule = self._build_schedule(len(instance.online_steps))
+        self._processed = 0
+        self._seen_steps = []
+        self._log_records = []
+        init_mode = str(self.cfg.dla.lambda0_init).lower()
+        if init_mode == "zero":
+            self._current_prices = np.zeros((int(instance.m),), dtype=float)
+        elif init_mode == "offline_util":
+            use_slack = self.cfg.dla.use_offline_slack and self.cfg.slack.enforce_slack
+            slack_fraction = self.cfg.slack.fraction if use_slack else 0.0
+            caps_eff = np.asarray(
+                effective_capacity(np.asarray(instance.b, dtype=float), use_slack, slack_fraction),
+                dtype=float,
+            ).reshape(-1)
+            load = np.asarray(initial_state.load, dtype=float).reshape(-1)
+            if load.size != caps_eff.size:
+                raise ValueError(
+                    f"DLA offline_util warm-start price dimension mismatch: "
+                    f"{load.size} vs {caps_eff.size}"
+                )
+            denom = np.where(caps_eff > 0.0, caps_eff, 1.0)
+            self._current_prices = np.maximum(0.0, load / denom)
+        elif init_mode == "sim_lp":
+            sim_prices = compute_resource_prices(
+                self.cfg,
+                instance,
+                initial_state,
+                log_to_console=False,
+                sample_online_caps=bool(self.cfg.pricing_sim.sample_online_caps),
+                num_samples=max(1, int(self.cfg.pricing_sim.num_samples)),
+            ).reshape(-1)
+            if sim_prices.size != int(instance.m):
+                raise ValueError(
+                    f"DLA sim_lp warm-start price dimension mismatch: "
+                    f"{sim_prices.size} vs {int(instance.m)}"
+                )
+            self._current_prices = sim_prices
+        else:
+            raise ValueError(f"Unknown dla.lambda0_init: {self.cfg.dla.lambda0_init}")
+
     def select_action(
         self,
         step: StepSpec,
         state: AssignmentState,
         instance: Instance,
     ) -> Decision:
-        # Lazily build phase schedule on the first call.
-        if not self._schedule:
-            self._schedule = self._build_schedule(len(instance.online_steps))
+        if self._instance_id != id(instance):
+            raise RuntimeError(
+                "GenericDynamicLearningPolicy.begin_instance(instance, initial_state) "
+                "must be called before select_action."
+            )
 
         # Update prices if a phase boundary was reached after the last step.
         self._maybe_update_prices(state, instance)

@@ -13,11 +13,7 @@ from generic.core.config import Config, load_config
 from generic.data.instance_generators import BaseInstanceGenerator
 from generic.data.offline_milp_assembly import build_offline_milp_data
 from generic.core.utils import effective_capacity, set_global_seed
-from generic.experiments.pipeline_registry import (
-    ONLINE_SIM_DUAL,
-    online_policy_needs_prices,
-    online_policy_price_path,
-)
+from generic.experiments.pipeline_registry import ONLINE_SIM_DUAL
 from generic.offline.solver import OfflineMILPSolver
 from generic.online.solver import OnlineSolver
 from generic.online.policies import BaseOnlinePolicy
@@ -195,42 +191,6 @@ def _compute_offline_util(
     return per_bin_mean.astype(float).tolist()
 
 
-def _compute_prices_if_needed(
-    cfg: Config,
-    policy_path: str,
-    instance: Any,
-    offline_state: Any,
-    seed: int,
-) -> Path | None:
-    if not policy_path or not online_policy_needs_prices(policy_path):
-        return None
-    from generic.online.pricing import compute_prices
-
-    price_path_str = online_policy_price_path(policy_path)
-    if price_path_str is None:
-        raise ValueError(f"No price output path configured for {policy_path}")
-    price_path = Path(price_path_str)
-    price_seed = seed + 10000
-    price_samples = 1
-    sample_online_caps = True
-    sample_online_costs = False
-    if policy_path == ONLINE_SIM_DUAL:
-        price_samples = max(1, int(cfg.sim_dual.num_samples))
-        sample_online_caps = bool(cfg.sim_dual.sample_online_caps)
-        sample_online_costs = bool(cfg.sim_dual.sample_online_costs)
-    compute_prices(
-        cfg,
-        instance,
-        offline_state,
-        price_path,
-        sample_online_caps=sample_online_caps,
-        sample_online_costs=sample_online_costs,
-        sample_seed=price_seed,
-        num_samples=price_samples,
-    )
-    return price_path
-
-
 def _compute_penalties(
     cfg: Config,
     instance: Any,
@@ -380,21 +340,13 @@ def run_eval(
         policy_path = online_policy_name
         if policy_path is None:
             policy_path = f"{online_policy_cls.__module__}.{online_policy_cls.__name__}"
-        price_path = _compute_prices_if_needed(
-            cfg,
-            policy_path,
-            instance,
-            offline_state,
-            seed,
-        )
-
-        if price_path is not None:
+        if policy_path == ONLINE_SIM_DUAL:
             try:
-                online_policy = online_policy_cls(cfg, price_path=price_path)
+                online_policy = online_policy_cls(cfg, pricing_sample_seed=seed + 10000)
             except TypeError as exc:
                 raise ValueError(
-                    f"{online_policy_cls.__name__} does not accept price_path but "
-                    f"pricing was requested for policy '{policy_path}'."
+                    f"{online_policy_cls.__name__} does not accept pricing_sample_seed but "
+                    f"policy '{policy_path}' requires deterministic pricing sampling."
                 ) from exc
         else:
             online_policy = online_policy_cls(cfg)
@@ -465,8 +417,6 @@ def main() -> None:
 
     offline_solver_cls = _import_symbol(args.offline_solver)
     online_policy_cls = _import_symbol(args.online_policy)
-
-    # If the online policy needs prices (e.g. sim_base), they are computed per seed.
 
     summary = run_eval(
         cfg,

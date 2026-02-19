@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
 import copy
-import json
 
 import gurobipy as gp
 from gurobipy import GRB
@@ -20,7 +18,6 @@ def _build_sampling_lp(
     samples: list[Instance],
     base_instance: Instance,
     *,
-    sample_online_costs: bool,
     residual: np.ndarray,
 ) -> tuple[gp.Model, gp.MConstr | None]:
     if not samples:
@@ -33,13 +30,15 @@ def _build_sampling_lp(
     costs_list: list[np.ndarray] = []
     feas_matrices: list[np.ndarray] = []
     feas_rhs: list[np.ndarray] = []
+    allow_future_online_costs = bool(cfg.costs.observe_future_online_costs)
     for inst in samples:
         T_onl = len(inst.online_steps)
         if T_onl <= 0:
             continue
         caps = np.asarray([step.cap_matrix for step in inst.online_steps], dtype=float)
         cap_list.append(caps)
-        cost_source = inst if sample_online_costs else base_instance
+        use_realized_future_costs = allow_future_online_costs
+        cost_source = base_instance if use_realized_future_costs else inst
         costs = np.asarray(
             cost_source.costs.assignment_costs[T_off : T_off + T_onl, :],
             dtype=float,
@@ -121,29 +120,33 @@ def _allow_fallback_online(instance: Instance) -> Instance:
     )
 
 
-def compute_prices(
+def compute_resource_prices(
     cfg: Config,
     instance: Instance,
     offline_state: AssignmentState,
-    out_path: Path,
     *,
     log_to_console: bool = False,
     sample_online_caps: bool = True,
-    sample_online_costs: bool = True,
     sample_seed: int | None = None,
     num_samples: int = 1,
-) -> dict[int, float | list[float]]:
+) -> np.ndarray:
     """
     Compute dual prices via a sampled fractional LP.
     - If sample_online_caps is True, online steps/feasibility are resampled using sample_seed.
-    - If sample_online_costs is True, online costs are resampled per sample.
+    - If cfg.costs.observe_future_online_costs is False, pricing uses sampled online costs.
+      If True, pricing uses realized online costs from the base instance.
     - For num_samples >= 1, solve a single averaged LP with shared capacities.
     """
     sample_count = max(1, int(num_samples))
-    if not sample_online_caps:
+    observe_future_online_costs = bool(cfg.costs.observe_future_online_costs)
+    # If future realized costs are hidden, pricing must use sampled scenarios.
+    use_sampled_online_caps = bool(sample_online_caps) or (not observe_future_online_costs)
+    if not use_sampled_online_caps:
         sample_count = 1
     pricing_cfg = cfg
-    # This is for purely online scenarios, so simdual is not just like cabf with 0 prices. but can be removed. 
+    # Ensure fallback remains available in the pricing LP, even if disabled for online execution 
+    # We do this so if a small subset of samples is infeasible, the whole pricing is not invalid. 
+    # Another approach would be to average duals only over feasible lps instead of this SAA approach
     if not cfg.problem.fallback_allowed_online:
         pricing_cfg = copy.deepcopy(cfg)
         pricing_cfg.problem.fallback_allowed_online = True
@@ -151,14 +154,11 @@ def compute_prices(
     if len(instance.online_steps) == 0:
         if log_to_console:
             print("Pricing: skipped (no online steps).")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "w") as f:
-            json.dump({"prices": {}}, f, indent=2)
-        return {}
+        return np.zeros((instance.m,), dtype=float)
 
     generator = BaseInstanceGenerator.from_config(pricing_cfg)
     samples: list[Instance] = []
-    if sample_online_caps:
+    if use_sampled_online_caps:
         for idx in range(sample_count):
             seed = None if sample_seed is None else int(sample_seed) + idx
             samples.append(
@@ -203,7 +203,6 @@ def compute_prices(
         pricing_cfg,
         samples,
         instance,
-        sample_online_costs=sample_online_costs,
         residual=residual,
     )
     model.Params.OutputFlag = 1 if log_to_console else 0
@@ -212,28 +211,7 @@ def compute_prices(
         raise RuntimeError(f"LP not optimal, status={model.Status}")
 
     pi = np.asarray(constr.Pi, dtype=float) if constr is not None else np.zeros((0,), dtype=float)
-    prices_out: dict[int, float | list[float]] = {}
-    if mode == "binpacking":
-        from binpacking.core.block_utils import block_dim
-
-        d = block_dim(n, m)
-        for i in range(n):
-            if d == 1:
-                prices_out[i] = float(abs(pi[i])) if i < pi.size else 0.0
-            else:
-                start = i * d
-                end = start + d
-                vals = np.abs(pi[start:end]).tolist()
-                if len(vals) < d:
-                    vals += [0.0] * (d - len(vals))
-                prices_out[i] = [float(x) for x in vals]
-    else:
-        prices = np.zeros((m,), dtype=float)
-        take = min(m, pi.size)
-        prices[:take] = np.abs(pi[:take])
-        prices_out = {i: [float(x) for x in prices] for i in range(n)}
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w") as f:
-        json.dump({"prices": prices_out}, f, indent=2)
-    return prices_out
+    prices = np.zeros((m,), dtype=float)
+    take = min(m, pi.size)
+    prices[:take] = np.abs(pi[:take])
+    return prices

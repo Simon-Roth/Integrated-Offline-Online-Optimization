@@ -25,6 +25,10 @@ from binpacking.core.block_utils import extract_volume
 
 class SimBasePolicy(BaseOnlinePolicy):
     """
+    Legacy policy kept for reproducibility of older experiments.
+    Note: the current evaluation pipeline no longer generates/loads file-based
+    prices for this policy automatically.
+
     Cost-minimizing Lagrangian policy:
     - score(i) = c_{ji} + λ_i * volume_j
     - choose feasible regular bin with minimum score, allowing evictions if needed
@@ -42,6 +46,14 @@ class SimBasePolicy(BaseOnlinePolicy):
                 self.lam[int(k)] = np.asarray(v, dtype=float)
             else:
                 self.lam[int(k)] = np.asarray([float(v)], dtype=float)
+
+    def begin_instance(
+        self,
+        instance: Instance,
+        initial_state: AssignmentState,
+    ) -> None:
+        # Stateless online policy once prices are loaded.
+        return
 
     def select_action(
         self,
