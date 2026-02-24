@@ -8,70 +8,84 @@ import numpy as np
 
 from generic.core.config import Config
 from generic.data.instance_generators import BaseInstanceGenerator
-from generic.data.offline_milp_assembly import build_offline_milp_data_from_arrays
-from generic.core.utils import effective_capacity
+from generic.core.utils import effective_capacity, feasible_option_indices
 from generic.core.models import AssignmentState, Instance, StepSpec
 
 
-def _build_sampling_lp(
+def _build_sampling_lp_sparse(
     cfg: Config,
     samples: list[Instance],
     base_instance: Instance,
     *,
     residual: np.ndarray,
-) -> tuple[gp.Model, gp.MConstr | None]:
+) -> tuple[gp.Model, list[gp.Constr]]:
     if not samples:
-        return gp.Model(), None
-    inst0 = samples[0]
-    fallback_idx = inst0.fallback_option_index
-    T_off = len(inst0.offline_steps)
+        return gp.Model(), []
 
-    cap_list: list[np.ndarray] = []
-    costs_list: list[np.ndarray] = []
-    feas_matrices: list[np.ndarray] = []
-    feas_rhs: list[np.ndarray] = []
+    inst0 = samples[0]
+    n = int(inst0.n)
+    T_off = len(inst0.offline_steps)
+    m = int(np.asarray(residual, dtype=float).reshape(-1).size)
+
+    scale = 1.0 / float(max(1, len(samples)))
     allow_future_online_costs = bool(cfg.costs.observe_future_online_costs)
-    for inst in samples:
+
+    model = gp.Model("pricing_fractional_sampling_sparse")
+    cap_expr = [gp.LinExpr() for _ in range(m)]
+
+    for sample_idx, inst in enumerate(samples):
         T_onl = len(inst.online_steps)
         if T_onl <= 0:
             continue
-        caps = np.asarray([step.cap_matrix for step in inst.online_steps], dtype=float)
-        cap_list.append(caps)
-        use_realized_future_costs = allow_future_online_costs
-        cost_source = base_instance if use_realized_future_costs else inst
+        cost_source = base_instance if allow_future_online_costs else inst
         costs = np.asarray(
             cost_source.costs.assignment_costs[T_off : T_off + T_onl, :],
             dtype=float,
         )
-        costs_list.append(costs)
-        for step in inst.online_steps:
-            feas_matrices.append(np.asarray(step.feas_matrix, dtype=float))
-            feas_rhs.append(np.asarray(step.feas_rhs, dtype=float))
+        if costs.shape[0] != T_onl:
+            raise ValueError(
+                f"Pricing costs row mismatch for sample {sample_idx}: "
+                f"expected {T_onl}, got {costs.shape[0]}."
+            )
 
-    if not cap_list:
-        return gp.Model(), None
+        for step_pos, step in enumerate(inst.online_steps):
+            step_cap = np.asarray(step.cap_matrix, dtype=float)
+            feasible_opts = feasible_option_indices(step.feas_matrix, step.feas_rhs)
+            if not feasible_opts:
+                raise RuntimeError(
+                    f"No feasible options in pricing sample for step {step.step_id}."
+                )
 
-    scale = 1.0 / float(max(1, len(samples)))
-    cap_matrices = np.concatenate(cap_list, axis=0) * scale
-    costs = np.vstack(costs_list) * scale
-    data = build_offline_milp_data_from_arrays(
-        cap_matrices=cap_matrices,
-        costs=costs,
-        feas_matrices=feas_matrices,
-        feas_rhs=feas_rhs,
-        b=residual,
-        fallback_idx=fallback_idx,
-        slack_enforce=False,
-        slack_fraction=0.0,
-    )
+            step_vars: list[gp.Var] = []
+            for option_id in feasible_opts:
+                if option_id >= costs.shape[1]:
+                    raise ValueError(
+                        f"Pricing cost column mismatch for option {option_id} "
+                        f"(available cols={costs.shape[1]})."
+                    )
+                var = model.addVar(
+                    lb=0.0,
+                    ub=1.0,
+                    vtype=GRB.CONTINUOUS,
+                    obj=float(costs[step_pos, option_id]) * scale,
+                    name=f"x_s{sample_idx}_t{step.step_id}_o{option_id}",
+                )
+                step_vars.append(var)
+                if 0 <= option_id < n:
+                    for r in range(m):
+                        cap_expr[r].addTerms(float(step_cap[r, option_id]) * scale, var)
 
-    model = gp.Model("pricing_fractional_sampling")
-    x = model.addMVar(shape=int(data.c.size), lb=0.0, ub=1.0, vtype=GRB.CONTINUOUS, name="x")
-    constr = None
-    if data.A.size:
-        constr = model.addMConstr(data.A, x, "<", data.b, name="Axb")
-    model.setObjective(data.c @ x, GRB.MINIMIZE)
-    return model, constr
+            model.addConstr(
+                gp.quicksum(step_vars) == 1.0,
+                name=f"assign_s{sample_idx}_t{step.step_id}",
+            )
+
+    cap_constr = [
+        model.addConstr(cap_expr[r] <= float(residual[r]), name=f"cap_{r}")
+        for r in range(m)
+    ]
+    model.ModelSense = GRB.MINIMIZE
+    return model, cap_constr
 
 
 def _allow_fallback_online(instance: Instance) -> Instance:
@@ -139,6 +153,10 @@ def compute_resource_prices(
     """
     sample_count = max(1, int(num_samples))
     observe_future_online_costs = bool(cfg.costs.observe_future_online_costs)
+    pricing_keep_fallback = bool(
+        getattr(cfg.pricing_sim, "fallback_allowed_online_for_pricing", True)
+    )
+
     # If future realized costs are hidden, pricing must use sampled scenarios.
     use_sampled_online_caps = bool(sample_online_caps) or (not observe_future_online_costs)
     if not use_sampled_online_caps:
@@ -147,7 +165,7 @@ def compute_resource_prices(
     # Ensure fallback remains available in the pricing LP, even if disabled for online execution 
     # We do this so if a small subset of samples is infeasible, the whole pricing is not invalid. 
     # Another approach would be to average duals only over feasible lps instead of this SAA approach
-    if not cfg.problem.fallback_allowed_online:
+    if pricing_keep_fallback and not cfg.problem.fallback_allowed_online:
         pricing_cfg = copy.deepcopy(cfg)
         pricing_cfg.problem.fallback_allowed_online = True
     pricing_instance = instance
@@ -170,7 +188,7 @@ def compute_resource_prices(
                 )
             )
     else:
-        if not cfg.problem.fallback_allowed_online:
+        if pricing_keep_fallback and not cfg.problem.fallback_allowed_online:
             pricing_instance = _allow_fallback_online(instance)
         samples.append(pricing_instance)
 
@@ -178,8 +196,8 @@ def compute_resource_prices(
     inst0 = samples[0] if samples else instance
     n = inst0.n
     m = inst0.m
-    if mode == "binpacking":
-        from binpacking.core.block_utils import block_dim, split_capacities
+    if mode == "bgap":
+        from bgap.core.block_utils import block_dim, split_capacities
 
         d = block_dim(n, m)
         use_slack = cfg.slack.enforce_slack and getattr(cfg.slack, "apply_to_online", True)
@@ -199,7 +217,7 @@ def compute_resource_prices(
         load = np.asarray(offline_state.load, dtype=float).reshape(-1)
         residual = np.maximum(0.0, b_eff - load)
 
-    model, constr = _build_sampling_lp(
+    model, cap_constr = _build_sampling_lp_sparse(
         pricing_cfg,
         samples,
         instance,
@@ -210,8 +228,8 @@ def compute_resource_prices(
     if model.Status != GRB.OPTIMAL:
         raise RuntimeError(f"LP not optimal, status={model.Status}")
 
-    pi = np.asarray(constr.Pi, dtype=float) if constr is not None else np.zeros((0,), dtype=float)
+    pi = np.asarray([float(con.Pi) for con in cap_constr], dtype=float)
     prices = np.zeros((m,), dtype=float)
     take = min(m, pi.size)
-    prices[:take] = np.abs(pi[:take])
+    prices[:take] = np.maximum(0.0, -pi[:take])
     return prices

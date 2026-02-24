@@ -1,7 +1,7 @@
 problem:
   n: 10 # number of options per step (length of x_t)
   T_off: 40 # number of offline steps (t_off)
-  m: 10 # number of resource constraints (length of b). Binpacking: m = n * d
+  m: 10 # number of resource constraints (length of b). BGAP: m = n * d
   b: [] # capacity vector b (length m). If empty, sample from b_mean/b_std
   b_mean: 1680 # 2500.0 # mean for sampling b when b is empty
   b_std: 20 # std for sampling b when b is empty
@@ -11,10 +11,10 @@ problem:
   allow_reassignment: false # if false: online policies/heuristics must not evict/reshuffle offline steps
 
 generation:
-  generator: "generic" # "generic" | "binpacking"
+  generator: "generic" # "generic" | "bgap"
 
 cap_coeffs:
-  offline_beta: [3, 7] # beta distribution for A_off coefficients (binpacking: item size)
+  offline_beta: [3, 7] # beta distribution for A_off coefficients (bgap: item size)
   offline_bounds: [30, 180] # bounds for A_off coefficients
   online_beta: [3, 7] # beta distribution for A_onl coefficients
   online_bounds: [30, 180] # bounds for A_onl coefficients
@@ -27,13 +27,13 @@ feasibility:
 
   # used only when mode == "exp_bin"
   exp_bin_offline:
-    p_max: 0.6
-    p_min: 0.1
-    alpha: 3.0
+    p_max: 0.9
+    p_min: 0.3
+    alpha: 2.0
   exp_bin_online:
-    p_max: 0.6
-    p_min: 0.1
-    alpha: 3.0
+    p_max: 0.9
+    p_min: 0.3
+    alpha: 2.0
 
 costs:
   assign_beta: [2.0, 5.0] # beta distribution for assignment costs
@@ -86,6 +86,7 @@ pricing_sim:
   num_samples: 10
   sample_online_caps: true # if true, sample online A_t^{cap} and feasibility for simulation
                           # however if observe_future_online_costs = false, then will be resampled either way (even if false here, so overrides it)
+  fallback_allowed_online_for_pricing: true # keep fallback available in pricing LP even if execution forbids online fallback
 rolling_milp:
   rollout_mode: "single" # "single" | "batch"
   num_rollouts: 100 # used only when rollout_mode == "batch"
@@ -104,4 +105,4 @@ primal_dual:
 
 eval:
   seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
-  track_offline_util_for_binpacking: true # binpacking-only: record mean offline utilization per bin (requires m = n * d)
+  track_offline_util_per_bin: true # bgap-only: record mean offline utilization per bin (requires m = n * d)

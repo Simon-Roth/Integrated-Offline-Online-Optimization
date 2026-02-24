@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from binpacking.experiments.run_param_sweep import main
+from bgap.experiments.run_param_sweep import main
 
 if __name__ == "__main__":
     main()

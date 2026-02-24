@@ -1,11 +1,13 @@
-# Offline/Online Allocation Framework (Generic + Binpacking)
+# Offline/Online Allocation Framework (Generic + BGAP)
 
 This repository implements a two-stage allocation framework:
 
 1) Offline phase: assign a known set of offline steps to options (one-hot actions) by solving a MILP or using heuristics.
-2) Online phase: assign arriving steps sequentially using online policies that can optionally evict or reassign offline steps (binpacking is a specialization).
+2) Online phase: assign arriving steps sequentially using online policies that can optionally evict or reassign offline steps (BGAP is a specialization).
 
-The system is designed to be generic (A x <= b MILP interface) and also provide binpacking-specific heuristics, policies, and experiments.
+The system is designed to be generic (A x <= b MILP interface) and also provide BGAP-specific heuristics, policies, and experiments.
+
+BGAP means **Block-structured Generalized Assignment Problem**. We keep bin/item terminology in algorithms and analysis for readability.
 
 The documentation below is organized by module and describes:
 - what each file does,
@@ -19,10 +21,10 @@ The documentation below is organized by module and describes:
 - `generic/`
   Core, problem-agnostic framework:
   `core/` (config, models, utils), `data/`, `offline/`, `online/`, `experiments/`.
-- `binpacking/`
-  Binpacking-specific heuristics, online policies, pricing, and experiments.
+- `bgap/`
+  BGAP-specific heuristics, online policies, pricing, and experiments.
 - `configs/`
-  Base YAML configs used by generic and binpacking workflows.
+  Base YAML configs used by generic and bgap workflows.
 - `analysis/`
   Analysis notebooks and scripts.
 - `scripts/`
@@ -40,7 +42,7 @@ The documentation below is organized by module and describes:
 
 The typical flow for a single experiment run is:
 
-1) Load config (generic or binpacking override).
+1) Load config (generic or bgap override).
 2) Generate an instance (offline steps, online steps, local feasibility constraints, costs) from the config.
 3) Assemble offline MILP data (A, b, c) from the instance.
 4) Solve the offline problem (MILP or heuristic).
@@ -48,7 +50,7 @@ The typical flow for a single experiment run is:
 6) Aggregate results and write a JSON summary.
 
 This flow is implemented in `generic/experiments/run_eval.py`, and is repeated
-for multiple pipelines and seeds in `generic/experiments/run_multiple_evals.py` and `binpacking/experiments/run_param_sweep.py`.
+for multiple pipelines and seeds in `generic/experiments/run_multiple_evals.py` and `bgap/experiments/run_param_sweep.py`.
 CLI wrappers live in `scripts/` (e.g., `scripts/run_eval.py`).
 
 ---
@@ -79,9 +81,9 @@ Key flags:
 - `fallback_allowed_online`: whether online steps may use fallback.
 - `allow_reassignment`: if false, online evictions/reassignments are disallowed.
 
-### `configs/binpacking/binpacking.yaml` + `binpacking/core/config.py`
-`binpacking/core/config.py` merges `configs/generic/generic.yaml` with binpacking overrides,
-so binpacking experiments can change only what is needed.
+### `configs/bgap/bgap.yaml` + `bgap/core/config.py`
+`bgap/core/config.py` merges `configs/generic/generic.yaml` with bgap overrides,
+so bgap experiments can change only what is needed.
 Defaults in `generic/core/config.py` mirror `configs/generic/generic.yaml`.
 
 ---
@@ -136,26 +138,26 @@ This file is the source of truth for how local feasibility is generated:
 - Fallback feasibility for offline and online is controlled by
   `fallback_allowed_offline` and `fallback_allowed_online` via A_t^{feas} rows.
 
-### Binpacking vs. generic problems
-Binpacking is encoded in the instance generator choice and block utilities, not in
+### BGAP vs. generic problems
+BGAP is encoded in the instance generator choice and block utilities, not in
 the experiment runner. In particular:
 
 - `generation.generator: "generic"` uses `GenericInstanceGenerator` and samples
   full `m x n` capacity matrices.
-- `generation.generator: "binpacking"` uses `BinpackingInstanceGenerator` and
+- `generation.generator: "bgap"` uses `BGAPInstanceGenerator` and
   enforces the block structure (`m = n * d`).
-- `binpacking/core/block_utils.py` provides binpacking-specific helpers such as
+- `bgap/core/block_utils.py` provides bgap-specific helpers such as
   `extract_volume` and `split_capacities`.
-- `binpacking/online/policies/*` are heuristics that assume the block structure.
+- `bgap/online/policies/*` are heuristics that assume the block structure.
 
-`binpacking/experiments/run_param_sweep.py` only orchestrates scenarios and pipelines;
+`bgap/experiments/run_param_sweep.py` only orchestrates scenarios and pipelines;
 it does not define the problem structure itself.
 
 To run a generic pipeline, use `scripts/run_eval.py` (or `python -m generic.experiments.run_eval`)
-with `configs/generic/generic.yaml`. To run binpacking experiments, use
+with `configs/generic/generic.yaml`. To run bgap experiments, use
 `scripts/run_param_sweep.py` and the merged config
-(`configs/generic/generic.yaml` + `configs/binpacking/binpacking.yaml` via `binpacking/core/config.py`).
-For a generic (non-binpacking) instance, set `generation.generator: "generic"`.
+(`configs/generic/generic.yaml` + `configs/bgap/bgap.yaml` via `bgap/core/config.py`).
+For a generic (non-bgap) instance, set `generation.generator: "generic"`.
 
 ### `generic/data/offline_milp_assembly.py`
 Builds the canonical MILP for the offline stage:
@@ -169,10 +171,10 @@ Key functions:
 - `build_offline_milp_data(instance, cfg)`:
   - convenience wrapper: pulls arrays from `Instance` and config.
 
-### `generic/data/__init__.py` and `binpacking/data/instance_generators.py`
+### `generic/data/__init__.py` and `bgap/data/instance_generators.py`
 `generic/data/__init__.py` re-exports the generator base and `GenericInstanceGenerator`.
-`binpacking/data/instance_generators.py` exposes `BinpackingInstanceGenerator`.
-The old block-structured implementation lives in `binpacking/data/instance_generators_legacy.py`
+`bgap/data/instance_generators.py` exposes `BGAPInstanceGenerator`.
+The old block-structured implementation lives in `bgap/data/instance_generators_legacy.py`
 as a backup.
 
 ---
@@ -192,16 +194,16 @@ Flow:
   - sets solver parameters,
   - solves and extracts an `AssignmentState` and `OfflineSolutionInfo`.
 
-### `binpacking/offline/solver.py`
-Extends the generic solver by adding warm-start heuristics from binpacking
+### `bgap/offline/solver.py`
+Extends the generic solver by adding warm-start heuristics from bgap
 offline heuristics. The warm-start is optional and configured by
 `cfg.solver.warm_start_heuristic`.
 
 ### `generic/offline/policies.py`
 Defines the interface for any offline heuristic (`solve(instance)`).
 
-### `binpacking/offline/policies/*`
-Binpacking-specific offline heuristics used for warm-starts and baselines:
+### `bgap/offline/policies/*`
+BGAP-specific offline heuristics used for warm-starts and baselines:
 
 - `first_fit_decreasing.py` (FFD):
   sort by size and place in first feasible bin that fits.
@@ -244,8 +246,8 @@ These are generic state mutation helpers used by the online solver:
 - `apply_decision`, `add_to_load`, `remove_from_load`
 - `count_fallback_steps`
 
-### `binpacking/online/state_utils.py` (binpacking helpers)
-These are binpacking-specific simulation helpers used by online heuristics:
+### `bgap/online/state_utils.py` (bgap helpers)
+These are bgap-specific simulation helpers used by online heuristics:
 - `PlacementContext`: a snapshot of loads and assignments for planning.
 - `build_context`: builds a context with effective capacities (slack-aware).
 - `execute_placement`: simulate placing an item into a bin; can evict/reassign.
@@ -258,9 +260,9 @@ this behavior in mind if new policies are added.
 
 ---
 
-## Online policies (binpacking)
+## Online policies (bgap)
 
-Located in `binpacking/online/policies/`:
+Located in `bgap/online/policies/`:
 
 
 - `cost_best_fit.py`:
@@ -309,7 +311,7 @@ Run a single pipeline across multiple seeds and output an aggregated JSON.
 Flow:
 - load config,
 - generate instance (offline + online),
-- solve offline (MILP from A,b,c if solver supports `solve_from_data` (which is the case for our generic_solver, but e.g. nor for some binpacking-specific offline heuristics like UTIL as they do not work on A,b,c but Instance)),
+- solve offline (MILP from A,b,c if solver supports `solve_from_data` (which is the case for our generic_solver, but e.g. nor for some bgap-specific offline heuristics like UTIL as they do not work on A,b,c but Instance)),
 - run online solver,
 - aggregate results and write JSON to `outputs/generic/results`.
 
@@ -318,7 +320,7 @@ Key CLI args:
 python scripts/run_eval.py \
   --config configs/generic/generic.yaml \
   --offline-solver generic.offline.solver.OfflineMILPSolver \
-  --online-policy binpacking.online.policies.cost_best_fit.CostAwareBestFitOnlinePolicy \
+  --online-policy bgap.online.policies.cost_best_fit.CostAwareBestFitOnlinePolicy \
   --seeds 1 2 3 \
   --m-onl 100
 ```
@@ -331,7 +333,7 @@ Key CLI args:
 ```
 python scripts/run_multiple_evals.py \
   --config configs/generic/generic.yaml \
-  --pipelines binpacking_milp+sim_dual util+cost_best_fit \
+  --pipelines bgap_milp+sim_dual util+cost_best_fit \
   --seeds 1 2 3 \
   --m-onl 100 \
   --compute-optimal
@@ -343,25 +345,25 @@ offline. This gives a lower bound or benchmark for evaluation.
 
 ---
 
-## Binpacking experiments
+## BGAP experiments
 
-### `binpacking/experiments/scenarios.py`
+### `bgap/experiments/scenarios.py`
 Defines scenario families for parameter sweeps:
 - ratio sweeps (T_off vs T_onl),
 - coefficient variance families,
 - graph sparsity variations,
 - load regimes and other controls.
 
-### `binpacking/experiments/run_param_sweep.py`
-Uses binpacking config + scenarios to run the generic evaluation pipeline across
-many settings and writes outputs to `outputs/binpacking/results/param_sweep/<scenario>/`.
+### `bgap/experiments/run_param_sweep.py`
+Uses bgap config + scenarios to run the generic evaluation pipeline across
+many settings and writes outputs to `outputs/bgap/results/param_sweep/<scenario>/`.
 
 Example:
 ```
 python scripts/run_param_sweep.py \
-  --base-config configs/binpacking/binpacking.yaml \
+  --base-config configs/bgap/bgap.yaml \
   --scenarios baseline_midvar_off40_on60 \
-  --pipelines binpacking_milp+cost_best_fit \
+  --pipelines bgap_milp+cost_best_fit \
   --seeds 1 2 3
 ```
 

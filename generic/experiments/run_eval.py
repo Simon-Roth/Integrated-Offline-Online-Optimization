@@ -171,11 +171,11 @@ def _compute_offline_util(
     instance: Any,
     offline_state: Any,
 ) -> List[float] | None:
-    if not bool(getattr(cfg.eval, "track_offline_util_for_binpacking", False)):
+    if not bool(getattr(cfg.eval, "track_offline_util_per_bin", False)):
         return None
     if instance.n <= 0 or instance.m % instance.n != 0:
         raise ValueError(
-            f"track_offline_util_for_binpacking expects m = n * d. "
+            f"track_offline_util_per_bin expects m = n * d. "
             f"Got n={instance.n}, m={instance.m}."
         )
     b_eff = np.asarray(
@@ -325,7 +325,7 @@ def run_eval(
     online_policy_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     runs: List[Dict[str, Any]] = []
-    track_offline_util = bool(getattr(cfg.eval, "track_offline_util_for_binpacking", False))
+    track_offline_util = bool(getattr(cfg.eval, "track_offline_util_per_bin", False))
     offline_fail_statuses = {"INFEASIBLE", "INF_OR_UNBD", "UNBOUNDED"}
     online_fail_statuses = {"INFEASIBLE"}
     generator = BaseInstanceGenerator.from_config(cfg)

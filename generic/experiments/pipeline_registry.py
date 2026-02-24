@@ -5,17 +5,17 @@ from typing import Dict, List
 
 # Offline
 OFFLINE_MILP_GENERIC = "generic.offline.solver.OfflineMILPSolver"
-OFFLINE_MILP_BINPACKING = "binpacking.offline.solver.OfflineMILPSolver"
-OFFLINE_CABFD = "binpacking.offline.policies.cost_best_fit_decreasing.CostAwareBestFitDecreasing"
-OFFLINE_UTILIZATION = "binpacking.offline.policies.utilization_priced.UtilizationPricedDecreasing"
+OFFLINE_MILP_BGAP = "bgap.offline.solver.OfflineMILPSolver"
+OFFLINE_CABFD = "bgap.offline.policies.cost_best_fit_decreasing.CostAwareBestFitDecreasing"
+OFFLINE_UTILIZATION = "bgap.offline.policies.utilization_priced.UtilizationPricedDecreasing"
 
 # Online
 ONLINE_ROLLING_MILP = "generic.online.policies.RollingHorizonMILPPolicy"
-ONLINE_CABF = "binpacking.online.policies.cost_best_fit.CostAwareBestFitOnlinePolicy"
+ONLINE_CABF = "bgap.online.policies.cost_best_fit.CostAwareBestFitOnlinePolicy"
 # Legacy policy (kept for reference, not used in default pipelines)
-ONLINE_SIM_BASE = "binpacking.online.policies.sim_base.SimBasePolicy"
+ONLINE_SIM_BASE = "bgap.online.policies.sim_base.SimBasePolicy"
 ONLINE_SIM_DUAL = "generic.online.policies.SimDualPolicy"
-ONLINE_DYNAMIC_LEARNING = "binpacking.online.policies.dynamic_learning.DynamicLearningPolicy"
+ONLINE_DYNAMIC_LEARNING = "bgap.online.policies.dynamic_learning.DynamicLearningPolicy"
 ONLINE_PRIMAL_DUAL = "generic.online.policies.PrimalDualPolicy"
 
 
@@ -56,7 +56,7 @@ def default_registry() -> PipelineRegistry:
     """
     registry = PipelineRegistry()
     offline_specs = [
-        ("binpacking_milp", OFFLINE_MILP_BINPACKING),
+        ("bgap_milp", OFFLINE_MILP_BGAP),
         ("cabfd", OFFLINE_CABFD),
         ("util", OFFLINE_UTILIZATION),
     ]

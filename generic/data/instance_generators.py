@@ -81,11 +81,11 @@ class BaseInstanceGenerator(ABC):
         name = getattr(getattr(cfg, "generation", None), "generator", "generic")
         if name == "generic":
             return GenericInstanceGenerator()
-        if name == "binpacking":
-            from binpacking.data.instance_generators import BinpackingInstanceGenerator
+        if name == "bgap":
+            from bgap.data.instance_generators import BGAPInstanceGenerator
 
-            return BinpackingInstanceGenerator()
-        raise ValueError(f"Unknown generator '{name}'. Expected 'generic' or 'binpacking'.")
+            return BGAPInstanceGenerator()
+        raise ValueError(f"Unknown generator '{name}'. Expected 'generic' or 'bgap'.")
 
 
 def _sample_cap_matrices_generic(

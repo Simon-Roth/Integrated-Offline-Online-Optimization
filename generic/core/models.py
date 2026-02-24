@@ -83,8 +83,8 @@ class Decision:
     - incremental_cost: cost accrued by this decision
     """
     placed_step: Tuple[StepId, OptionId]
-    evicted_offline_steps: List[Tuple[StepId, OptionId]] # if allow_reassignment is false -> empty (only for bin packing logic)
-    reassigned_offline_steps: List[Tuple[StepId, OptionId]] # if allow_reassignment is false -> empty (only for bin packing logic)
+    evicted_offline_steps: List[Tuple[StepId, OptionId]] # if allow_reassignment is false -> empty (only for BGAP logic)
+    reassigned_offline_steps: List[Tuple[StepId, OptionId]] # if allow_reassignment is false -> empty (only for BGAP logic)
     incremental_cost: float
 
 

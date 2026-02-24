@@ -19,7 +19,7 @@ class ProblemConfig:
     - fallback_is_enabled: if False, no rejection option exists in the instance
     - fallback_allowed_offline: if True, offline steps may use the rejection option
     - fallback_allowed_online: if True, online steps may use the rejection option
-    - allow_reassignment: if True, bin-packing specific (includes bp. dynamic learning policy) online policies may evict/reassign offline steps
+    - allow_reassignment: if True, BGAP-specific online policies may evict/reassign offline steps
     """
     n: int = 10
     T_off: int = 40
@@ -36,14 +36,14 @@ class ProblemConfig:
 class GenerationConfig:
     """
     Instance generator selection.
-    - generator: "generic" | "binpacking"
+    - generator: "generic" | "bgap"
     """
     generator: str = "generic"
 
 @dataclass
 class CapCoeffGenerationConfig:
     """
-    Coefficient distributions for A_t^{cap} (binpacking interprets these as sizes).
+    Coefficient distributions for A_t^{cap} (bgap interprets these as sizes).
     - offline_beta: Beta distribution parameters for offline coefficients.
     - offline_bounds: lower/upper bounds for offline coefficients.
     - online_beta: Beta distribution parameters for online coefficients.
@@ -161,9 +161,12 @@ class PricingSimulationConfig:
     Shared simulation settings for sampled LP pricing.
     - num_samples: number of samples used (>=1)
     - sample_online_caps: if True, sample online A_t^{cap} and feasibility
+    - fallback_allowed_online_for_pricing: if True, force fallback to remain available
+      in pricing LPs even when online execution disallows fallback
     """
     num_samples: int = 10
     sample_online_caps: bool = True
+    fallback_allowed_online_for_pricing: bool = True
 
 @dataclass
 class RollingMILPConfig:
@@ -235,7 +238,7 @@ class EvalConfig:
         31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
         41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
     )
-    track_offline_util_for_binpacking: bool = True # Needed to visualize residual capacities after offline phase for bin packing
+    track_offline_util_per_bin: bool = True # Needed to visualize residual capacities after offline phase for BGAP
 
 @dataclass
 class Config:
@@ -280,7 +283,7 @@ def load_config_data(data: dict) -> Config:
         heuristics=HeuristicConfig(**data.get("heuristics", {})),
         eval=EvalConfig(
             tuple(data["eval"]["seeds"]),
-            bool(data["eval"].get("track_offline_util_for_binpacking", False)),
+            bool(data["eval"].get("track_offline_util_per_bin", False)),
         ),
     )
 
