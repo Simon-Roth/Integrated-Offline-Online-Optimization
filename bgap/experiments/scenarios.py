@@ -233,7 +233,14 @@ add_scenario_with_feas_variants(
 )
 
 # ========= FAMILY 3: GRAPH SPARSITY (only p_onl changes), fixed ratio (60/40) =========
-for tag, p_onl in [("dense", 0.8), ("mid", 0.5), ("sparse", 0.2)]:
+for tag, p_onl in [
+    ("dense", 0.8),
+    ("mid", 0.5),
+    ("sparse", 0.2),
+    ("0.4", 0.4),
+    ("0.3", 0.3),
+    ("0.1", 0.1),
+]:
     add_scenario_with_feas_variants(
         name=f"graph_{tag}_off60_on40",
         overrides={
@@ -292,7 +299,14 @@ for ratio_tag, T_off in [("off20_on80", 40), ("off60_on40", 120)]:
     base = ratio_overrides(T_off)
     base["problem"]["allow_reassignment"] = True
     base["problem"]["fallback_allowed_online"] = False
-    for sparsity_tag, p_onl in [("dense", 0.8), ("mid", 0.5), ("sparse", 0.2)]:
+    for sparsity_tag, p_onl in [
+        ("dense", 0.8),
+        ("mid", 0.5),
+        ("sparse", 0.2),
+        ("0.4", 0.4),
+        ("0.3", 0.3),
+        ("0.1", 0.1),
+    ]:
         add_scenario_with_feas_variants(
             name=f"graph_{sparsity_tag}_{ratio_tag}_reshuffle",
             overrides={

@@ -64,7 +64,6 @@ class UtilizationPricedDecreasing(BaseOfflinePolicy):
         avg_cost = float(np.mean(inst.costs.assignment_costs[: len(inst.offline_steps), :regular_options]))
         if not np.isfinite(avg_cost) or avg_cost <= 0.0:
             raise ValueError('Negative or infinite mean cost not fit for UtilDecreasing')
-            avg_cost = 1.0
         cost_scale = avg_cost
         # We keep lambda here dimensionless: costs are normalized by avg cost and volumes by capacity
         # Relative pricing strength is tuned via update_rule/price_exponent/exp_rate

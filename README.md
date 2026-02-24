@@ -1,13 +1,13 @@
 # Offline/Online Allocation Framework (Generic + BGAP)
 
-This repository implements a two-stage allocation framework:
+This repository implements a integrated optimization framework:
 
 1) Offline phase: assign a known set of offline steps to options (one-hot actions) by solving a MILP or using heuristics.
-2) Online phase: assign arriving steps sequentially using online policies that can optionally evict or reassign offline steps (BGAP is a specialization).
+2) Online phase: assign arriving steps sequentially using online policies.
 
 The system is designed to be generic (A x <= b MILP interface) and also provide BGAP-specific heuristics, policies, and experiments.
 
-BGAP means **Block-structured Generalized Assignment Problem**. We keep bin/item terminology in algorithms and analysis for readability.
+BGAP means **Block-structured Generalized Assignment Problem** and serves as the formulation we use for a hospital case study, where items (patients) have to be assigned to bins (operating/surgery rooms).
 
 The documentation below is organized by module and describes:
 - what each file does,
@@ -22,7 +22,7 @@ The documentation below is organized by module and describes:
   Core, problem-agnostic framework:
   `core/` (config, models, utils), `data/`, `offline/`, `online/`, `experiments/`.
 - `bgap/`
-  BGAP-specific heuristics, online policies, pricing, and experiments.
+  BGAP-specific heuristics, online policies, and experiments.
 - `configs/`
   Base YAML configs used by generic and bgap workflows.
 - `analysis/`
@@ -34,7 +34,7 @@ The documentation below is organized by module and describes:
 - `requirements.txt`
   Python dependencies (NumPy, Gurobi, etc).
 - `README.md`
-  Hola
+  Hola.
 
 ---
 
@@ -43,7 +43,7 @@ The documentation below is organized by module and describes:
 The typical flow for a single experiment run is:
 
 1) Load config (generic or bgap override).
-2) Generate an instance (offline steps, online steps, local feasibility constraints, costs) from the config.
+2) Generate an instance (offline steps, online steps, local feasibility constraints, costs) from the config (e.g., via. BGAPInstanceGenerator, GenericInstanceGenerator, or a custom generator using the BaseInstanceGenerator framework).
 3) Assemble offline MILP data (A, b, c) from the instance.
 4) Solve the offline problem (MILP or heuristic).
 5) Run the online policy sequentially on online steps.
@@ -63,14 +63,18 @@ Defines all configuration dataclasses and YAML parsing.
 - `ProblemConfig`: n options, T_off steps, m capacity constraints, b (or b_mean/b_std), fallback flags, allow_reassignment.
 - `CapCoeffGenerationConfig`: Beta distribution and bounds for offline/online
   A_t^{cap} coefficients.
-- `FeasibilityGenerationConfig`: feasibility edge probabilities.
+- `FeasibilityGenerationConfig`: feasibility edge probabilities (uniform or exp_bin mode).
 - `CostConfig`: assignment costs, fallback cost, eviction penalty model.
 - `SlackConfig`: global slack, optionally applied to online phase.
 - `UtilizationPricingConfig`: settings for utilization-priced heuristic.
 - `DLAConfig`: settings for Dynamic Learning Algorithm (DLA).
-- `SolverConfig`: MILP settings and warm-start heuristic selection.
-- `HeuristicConfig`: scalarization for vector sizes and residuals.
-- `EvalConfig`: list of seeds.
+- `PricingSimulationConfig`: shared sampled LP pricing settings (num_samples, fallback override) (used for initializing prices of certain price-based policies)
+- `RollingMILPConfig`: rolling-horizon MILP controls (single or batch rollout mode).
+- `PrimalDualConfig`: primal-dual online policy controls (step-size schedule, normalization, lambda0 init).
+- `SolverConfig`: MILP settings and warm-start heuristic selection (only "CABFD" and "none" supported).
+- `HeuristicConfig`: scalarization for vector sizes and residuals (eg for residual scalarizatino in CaBfd).
+- `EvalConfig`: list of seeds, offline utilization tracking flag.
+- `GenerationConfig`: instance generator selection ("generic" or "bgap").
 
 ### `configs/generic/generic.yaml`
 Default configuration for the generic framework.
@@ -118,25 +122,29 @@ Defines the core types that all phases share.
 ### `generic/data/instance_generators.py`
 Responsible for sampling A_t^{cap}, local feasibility (A_t^{feas}, b_t), and costs from the config.
 
-Key functions:
-- `BaseInstanceGenerator.from_config(cfg).generate_full_instance(cfg, seed, T_onl=...)`:
-  - samples capacity vector b (or uses provided list),
-  - samples offline A_t^{cap} coefficients,
-  - samples offline feasible options with probability `p_off` and encodes them as
-    explicit local constraints A_t^{feas} x_t = b_t (one-hot + forbidden options),
-  - samples offline assignment costs,
-  - samples online A_t^{cap} coefficients and feasible options with probability `p_onl`,
-    then builds A_t^{feas} x_t = b_t and calls `_ensure_row_feasible` to guarantee at least
-    one feasible regular option,
-  - appends online costs to the cost matrix.
-- `BaseInstanceGenerator.generate_offline_instance(cfg, seed)`:
-  - wrapper that calls `generate_full_instance` with `T_onl=0`.
+- `BaseInstanceGenerator` (abstract base):
+  - `from_config(cfg)`: factory that selects `GenericInstanceGenerator` or `BGAPInstanceGenerator`.
+  - `generate_full_instance(cfg, seed, T_onl=...)`: generates offline + online in one pass.
+  - `generate_offline_instance(cfg, seed)`: wrapper that calls `generate_full_instance` with `T_onl=0`.
+  - `resample_online_phase(cfg, instance, seed=...)`: returns a copy of `instance` with freshly sampled online steps (used for pricing).
+  - `sample_cap_matrices(cfg, rng, count, n, m, phase=...)`: samples capacity matrices for pricing/rolling MILP.
 
-This file is the source of truth for how local feasibility is generated:
-- Offline feasibility uses `cfg.feasibility.p_off` and is encoded in A_t^{feas}, b_t.
+- `GenericInstanceGenerator`: full m×n capacity matrices per step.
+
+Generation details:
+- Offline feasibility uses `cfg.feasibility.p_off` (or exp_bin params) and is encoded in A_t^{feas}, b_t.
 - Online feasibility uses `cfg.feasibility.p_onl` and `_ensure_row_feasible`.
 - Fallback feasibility for offline and online is controlled by
   `fallback_allowed_offline` and `fallback_allowed_online` via A_t^{feas} rows.
+
+### `generic/data/generator_utils.py`
+Low-level sampling helpers shared by all generators:
+- `_coerce_b`: builds capacity vector b from config (sampled or fixed).
+- `_ensure_row_feasible`: guarantees at least one feasible option per step (to avoid trivial cases).
+- `_build_feas_constraints`: builds A_t^{feas}, b_t (one-hot + forbidden options).
+- `_sample_feas_mask_by_option`: samples feasibility masks (uniform or exp_bin).
+- `_sample_assignment_costs`: samples costs from Beta distribution.
+- `_normalize_beta_params`, `_normalize_bounds`, `_cap_params_for_phase`: normalization helpers.
 
 ### BGAP vs. generic problems
 BGAP is encoded in the instance generator choice and block utilities, not in
@@ -144,24 +152,23 @@ the experiment runner. In particular:
 
 - `generation.generator: "generic"` uses `GenericInstanceGenerator` and samples
   full `m x n` capacity matrices.
+  For a generic (non-bgap) instance, set `generation.generator: "generic"`.
 - `generation.generator: "bgap"` uses `BGAPInstanceGenerator` and
   enforces the block structure (`m = n * d`).
 - `bgap/core/block_utils.py` provides bgap-specific helpers such as
   `extract_volume` and `split_capacities`.
 - `bgap/online/policies/*` are heuristics that assume the block structure.
 
-`bgap/experiments/run_param_sweep.py` only orchestrates scenarios and pipelines;
+`bgap/experiments/run_param_sweep.py` only orchestrates scenarios and pipelines for bgap specific ceteris-paribus sweeps;
 it does not define the problem structure itself.
 
 To run a generic pipeline, use `scripts/run_eval.py` (or `python -m generic.experiments.run_eval`)
 with `configs/generic/generic.yaml`. To run bgap experiments, use
-`scripts/run_param_sweep.py` and the merged config
-(`configs/generic/generic.yaml` + `configs/bgap/bgap.yaml` via `bgap/core/config.py`).
-For a generic (non-bgap) instance, set `generation.generator: "generic"`.
+the merged config
 
 ### `generic/data/offline_milp_assembly.py`
 Builds the canonical MILP for the offline stage:
-minimize c^T x subject to A x <= b.
+minimize c^T x subject to A x <= b. (we chose this representation for generality and to reflect many opt. problems; e.g., = can be expressed as <= and >=)
 
 Key functions:
 - `build_offline_milp_data_from_arrays(...)`:
@@ -197,7 +204,7 @@ Flow:
 ### `bgap/offline/solver.py`
 Extends the generic solver by adding warm-start heuristics from bgap
 offline heuristics. The warm-start is optional and configured by
-`cfg.solver.warm_start_heuristic`.
+`cfg.solver.warm_start_heuristic`. Currently `"CABFD"` and `"none"` are implemented.
 
 ### `generic/offline/policies.py`
 Defines the interface for any offline heuristic (`solve(instance)`).
@@ -211,16 +218,30 @@ BGAP-specific offline heuristics used for warm-starts and baselines:
   sort by size and place in bin with smallest residual that fits.
 - `cost_best_fit_decreasing.py` (CABFD):
   sort by size and choose lowest assignment cost, tie-break by residual.
-- `utilization_priced.py`:
-  dynamic pricing based on bin utilization (penalize high load bins).
+- `utilization_priced.py` (UTIL):
+  conservative planning based on bin utilization prices (penalize high load bins).
+- `_policy_utils.py`:
+  shared helpers: `sorted_steps_by_volume`, `init_loads_and_caps`, `objective_with_fallback`.
 
 ---
 
 ## Online phase
 
 ### `generic/online/policies.py`
-Defines the `BaseOnlinePolicy` interface (`select_action`), plus
-`PolicyInfeasibleError` for signaling infeasible placement.
+Defines the `BaseOnlinePolicy` interface (`select_action`, `begin_instance`), plus re-exports `PolicyInfeasibleError`.
+
+Also contains the generic policy implementations:
+- `PrimalDualPolicy`: online primal-dual policy. Each arriving step is placed by solving a one-step MILP with price-modified costs; dual prices are updated after each decision.
+- `SimDualPolicy`: static-price variant — initializes lambda via sampled LP pricing (`sim_lp`), then keeps prices fixed. Delegates to `PrimalDualPolicy` with zero step size.
+- `RollingHorizonMILPPolicy`: solves a MILP over the current step + sampled remaining steps (single or batch rollout mode).
+- `GenericDynamicLearningPolicy`: dynamic price-updating policy using a geometric phase schedule. Recomputes prices by solving a fractional LP over observed steps. No evictions (generic version).
+
+### `generic/online/policy_utils.py`
+Shared helpers for online policies:
+- `PolicyInfeasibleError`: raised when a policy cannot place the arriving step.
+- `current_cost_row`: returns the assignment cost row for a step.
+- `remaining_capacities`: computes b - usage, with optional slack.
+- `lookup_assignment_cost`: returns the cost for a specific step→option pair.
 
 ### `generic/online/solver.py`
 Orchestrates the online phase:
@@ -234,29 +255,30 @@ Orchestrates the online phase:
 
 Important behavior:
 - If `cfg.problem.allow_reassignment` is false, any decision with evictions or
-  reassignments triggers an error.
+  reassignments triggers fallback handling if available (not an error — the solver routes it to fallback).
 - Fallback placement is controlled by:
   - `fallback_is_enabled`
   - `fallback_allowed_online`
   - per-step A_t^{feas} rows that allow or forbid the fallback option.
+- `cfg.costs.stop_online_on_first_failure`: if True, stop at first unplaceable step; if False, continue.
 
 ### `generic/online/state_utils.py` (generic core)
-These are generic state mutation helpers used by the online solver:
+Generic state mutation helpers used by the online solver:
 - `clone_state`, `build_cap_lookup`
 - `apply_decision`, `add_to_load`, `remove_from_load`
 - `count_fallback_steps`
 
 ### `bgap/online/state_utils.py` (bgap helpers)
-These are bgap-specific simulation helpers used by online heuristics:
+BGAP-specific simulation helpers used by online heuristics:
 - `PlacementContext`: a snapshot of loads and assignments for planning.
 - `build_context`: builds a context with effective capacities (slack-aware).
 - `execute_placement`: simulate placing an item into a bin; can evict/reassign.
+  Mutates the context on success — policies rebuild the context per candidate to isolate attempts.
 - `eviction_penalty`: compute eviction penalty (per item or per usage).
+- `eviction_order_desc`: offline items in a bin sorted by size (descending), used as eviction order.
+- `select_reassignment_bin`: choose a reassignment destination for an evicted offline item (cost or residual mode).
+- `candidate_bins`: feasible regular bins for an online step.
 - `effective_capacities`, `offline_volumes`, `TOLERANCE`.
-
-Note: `execute_placement` mutates the context on success, so policies should
-either rebuild the context per candidate (as the current policies do) or keep
-this behavior in mind if new policies are added.
 
 ---
 
@@ -264,15 +286,14 @@ this behavior in mind if new policies are added.
 
 Located in `bgap/online/policies/`:
 
-
-- `cost_best_fit.py`:
-  chooses bin with lowest incremental cost (cost aware), tie-break by residual (best fit), two-pass (-> no eviction then eviction).
-- `sim_base.py`:
-  legacy policy kept for reproducibility of older runs; it expects file-based
-  precomputed dual prices and is not used in default pipelines.
-- `dynamic_learning.py`:
-  dynamic learning algorithm with phase schedule. Recomputes prices by solving
-  a fractional LP on observed steps (scaled capacities).
+- `cost_best_fit.py` (`CostAwareBestFitOnlinePolicy`):
+  chooses bin with lowest incremental cost (cost aware), tie-break by residual (best fit). Two-pass: first without eviction, then with eviction if needed and allowed.
+- `best_fit.py` (`BestFitOnlinePolicy`):
+  greedy best-fit by residual capacity. Two-pass: first fit-without-eviction, then overflow bins with eviction allowed.
+- `sim_base.py` (`SimBasePolicy`):
+  legacy policy kept for reproducibility of older runs; expects file-based precomputed dual prices and is not used in default pipelines -> was replaced by SimDual generic policy.
+- `dynamic_learning.py` (`DynamicLearningPolicy`):
+  extends `GenericDynamicLearningPolicy` with bgap-specific eviction logic. When no regular bin fits (or the parent policy places in fallback), tries evictions for each candidate bin.
 
 ---
 
@@ -285,15 +306,14 @@ Computes sampled LP dual prices used by price-based policies:
 - builds a fractional LP for a sampled set of online steps (same horizon, new seed),
 - supports separate switches for sampling online A/feasibility vs. online costs:
   - `cfg.pricing_sim.sample_online_caps` controls resampling of A_t^{cap} and feasibility,
-  - `cfg.pricing_sim.sample_online_costs` controls whether online costs are resampled or taken from the realized instance,
+  - `cfg.costs.observe_future_online_costs` controls whether online costs are resampled or taken from the realized instance,
 - allows fallback in the pricing LP (to guarantee successful computation) when a fallback option exists, penalized by `cfg.costs.huge_fallback`,
-- pricing is in-memory (`compute_resource_prices`), used by `SimDual`
-  and other policies that initialize prices from sampled LPs.
+  controlled by `cfg.pricing_sim.fallback_allowed_online_for_pricing`,
+- pricing is in-memory (`compute_resource_prices`), used by `SimDualPolicy`
+  and `PrimalDualPolicy` when `lambda0_init == "sim_lp"`.
 
 ### Dynamic Learning pricing
-`dynamic_learning.py` has its own LP-based pricing for each phase. It also
-allows fallback in the pricing LP (to avoid infeasibility) and uses
-`cfg.costs.huge_fallback` as penalty.
+`GenericDynamicLearningPolicy` (and `DynamicLearningPolicy`) have their own LP-based pricing for each phase. Uses observed steps up to the phase boundary t_k, with a scaled residual capacity. Also allows fallback in the pricing LP and uses `cfg.costs.huge_fallback` as penalty. Phase schedule is geometric: t_k = ceil(ε · T_onl · 2^k).
 
 ---
 
@@ -305,13 +325,16 @@ registers the default pipelines. Provides:
 - `PipelineSpec` (name + offline solver + online policy).
 - `default_registry()` to build all combinations.
 
+Registered offline solvers: `bgap_milp` (bgap MILP), `cabfd` (CABFD heuristic), `util` (UtilizationPriced).
+Registered online policies: `rolling_horizon_milp`, `cost_best_fit`, `sim_dual`, `dynamic_learning`, `primal_dual`.
+
 ### `generic/experiments/run_eval.py`
 Run a single pipeline across multiple seeds and output an aggregated JSON.
 
 Flow:
 - load config,
 - generate instance (offline + online),
-- solve offline (MILP from A,b,c if solver supports `solve_from_data` (which is the case for our generic_solver, but e.g. nor for some bgap-specific offline heuristics like UTIL as they do not work on A,b,c but Instance)),
+- solve offline (MILP from A,b,c if solver supports `solve_from_data`, otherwise via `solve`),
 - run online solver,
 - aggregate results and write JSON to `outputs/generic/results`.
 
@@ -346,26 +369,67 @@ offline. This gives a lower bound or benchmark for evaluation.
 ---
 
 ## BGAP experiments
+**Thesis experiments** can be reconstructured using `run_param_sweep.py` and the generic config copy.
 
 ### `bgap/experiments/scenarios.py`
 Defines scenario families for parameter sweeps:
 - ratio sweeps (T_off vs T_onl),
 - coefficient variance families,
 - graph sparsity variations,
-- load regimes and other controls.
+- reshuffling scenarios.
+
+Each scenario can be combined with feasibility variants (uniform or exp_bin) via `FEAS_VARIANTS_ACTIVE`.
+Scenarios are appended to the global `SCENARIO_SWEEP` list at module import time.
+`select_scenarios(names)` filters by name and raises on unknown names.
 
 ### `bgap/experiments/run_param_sweep.py`
 Uses bgap config + scenarios to run the generic evaluation pipeline across
 many settings and writes outputs to `outputs/bgap/results/param_sweep/<scenario>/`.
 
+Flags:
+- `--skip-optimal`: skip the full-horizon optimal benchmark per scenario.
+- `--only-optimal`: run only the optimal benchmark (no pipelines).
+
 Example:
 ```
 python scripts/run_param_sweep.py \
   --base-config configs/bgap/bgap.yaml \
-  --scenarios baseline_midvar_off40_on60 \
+  --scenarios baseline_midvar_off40_on60_uniform \
   --pipelines bgap_milp+cost_best_fit \
   --seeds 1 2 3
 ```
+
+---
+
+## Grid search modules
+
+### `generic/experiments/grid_search/primal_dual_grid_search.py`
+Grid search over `PrimalDualPolicy` hyperparameters:
+- Three grid profiles: `raw` (no normalization), `norm_update`, `norm_update_costs`.
+- Sweeps: `eta_mode`, `eta0`, `eta_decay`, `eta_min`, `normalize_update`, `normalize_costs`, `use_remaining_capacity_target`, `cost_scale_mode`, `lambda0_init`, `pricing_num_samples`, `pricing_sample_online_caps`.
+- Supports checkpoint/resume via `--resume-dir`.
+- Outputs `results.json`, `results.csv`, and `best.json` to the output directory.
+
+```
+python scripts/run_primal_dual_grid_search.py \
+  --config configs/generic/generic.yaml \
+  --horizon 300 \
+  --seeds 1 2 3 5
+```
+
+### `bgap/experiments/grid_search/dla_grid_search.py`
+Grid search over `DynamicLearningPolicy` hyperparameters:
+- Sweeps: `epsilon`, `min_phase_len`, `use_offline_slack` across multiple horizons.
+- Outputs `results.json`, `results.csv`, `combo_results.csv`, and `best.json`.
+
+```
+python scripts/run_dla_grid_search.py \
+  --base-config configs/bgap/bgap.yaml \
+  --horizons 60 100 150
+```
+
+### `bgap/experiments/grid_search/util_pricing_grid_search.py`
+Grid search over `UtilizationPricedDecreasing` hyperparameters (offline heuristic).
 
 ---
 
@@ -373,11 +437,14 @@ python scripts/run_param_sweep.py \
 
 `generic/experiments/run_eval.py` produces summaries that include:
 - per-run offline/online status, objective, runtime,
-- aggregate means across seeds,
-- status counts and failure counts.
+- aggregate means across seeds (over completed runs only),
+- status counts and failure counts,
+- optional `offline_util_per_bin` (per-bin utilization after offline phase, if `track_offline_util_per_bin` is enabled),
+- penalized objectives (`*_objective_penalized`) using `fail_penalty_per_item`.
 
 `run_multiple_evals.py` adds a `pipeline` field and writes one JSON per pipeline.
 `optimal_benchmark.py` writes an optimal full-horizon JSON.
+`run_param_sweep.py` adds `scenario`, `scenario_description`, and `problem` fields to each output.
 
 ---
 
@@ -395,6 +462,8 @@ Notes:
 
 ---
 
-## Legacy or deprecated components 
+## Legacy or deprecated components
 
-default.yaml 
+- `bgap/data/instance_generators_legacy.py`: old block-structured generator, kept as backup.
+- `bgap/online/policies/sim_base.py` (`SimBasePolicy`): legacy policy that reads file-based prices; not used in default pipelines.
+- `configs/default.yaml`: unused default config.

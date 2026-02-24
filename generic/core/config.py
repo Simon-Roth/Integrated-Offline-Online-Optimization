@@ -209,10 +209,10 @@ class SolverConfig:
     """
     Solver-specific configuration options.
     - use_warm_start: whether to automatically generate warm start solutions
-    - warm_start_heuristic: which heuristic to use for warm start ("FFD", "BFD", "CBFD", "PD", "none")
+    - warm_start_heuristic: which heuristic to use for warm start ("CABFD", "none")
     """
     use_warm_start: bool = True
-    warm_start_heuristic: str = "CABFD"  # "FFD", "BFD", "CBFD", "PD", "none"
+    warm_start_heuristic: str = "CABFD" 
 
 
 @dataclass

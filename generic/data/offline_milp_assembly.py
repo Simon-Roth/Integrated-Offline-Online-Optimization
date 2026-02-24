@@ -9,6 +9,7 @@ import numpy as np
 from generic.core.config import Config
 from generic.core.models import Instance
 from generic.core.utils import effective_capacity
+from generic.data.generator_utils import _as_length_vector
 
 
 @dataclass(frozen=True)
@@ -23,15 +24,6 @@ class OfflineMILPData:
     fallback_idx: int
     m: int
     cap_matrices: np.ndarray
-
-
-def _as_length_vector(value: float | Sequence[float], length: int) -> np.ndarray:
-    arr = np.asarray(value, dtype=float).reshape(-1)
-    if arr.size == 1:
-        return np.full(length, float(arr[0]))
-    if arr.size != length:
-        raise ValueError(f"Expected {length} values, got {arr.size}.")
-    return arr
 
 
 def build_offline_milp_data_from_arrays(
