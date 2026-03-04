@@ -154,9 +154,16 @@ class PrimalDualPolicy(BaseOnlinePolicy):
             load = np.asarray(initial_state.load, dtype=float).reshape(-1)
             denom = np.where(caps_eff > 0.0, caps_eff, 1.0)
             utilization = np.maximum(0.0, load / denom)
-            eta0 = self._eta_t() * self._eta_scale
-            offline_util_lambda = eta0 * utilization
-            self._lambda = offline_util_lambda
+            init_scale_cfg = getattr(self.cfg.primal_dual, "offline_util_init_scale", None)
+            if init_scale_cfg is None:
+                raise ValueError(
+                    "primal_dual.offline_util_init_scale must be set when "
+                    "primal_dual.lambda0_init='offline_util'."
+                )
+            init_scale = float(init_scale_cfg)
+            if init_scale < 0.0:
+                raise ValueError("primal_dual.offline_util_init_scale must be >= 0.")
+            self._lambda = float(init_scale) * self._eta_scale * utilization
         elif init_mode == "zero":
             self._lambda = np.zeros_like(caps_eff)
         elif init_mode == "sim_lp":
@@ -175,7 +182,8 @@ class PrimalDualPolicy(BaseOnlinePolicy):
                     f"{sim_prices.size} vs {caps_eff.size}"
                 )
             # Keep price scale compatible with optional primal-dual cost normalization.
-            self._lambda = sim_prices * self._eta_scale
+            sim_scale = float(getattr(self.cfg.primal_dual, "sim_lp_init_scale", 1.0))
+            self._lambda = sim_prices * self._eta_scale * sim_scale
         else:
             raise ValueError(f"Unknown primal_dual.lambda0_init: {self.cfg.primal_dual.lambda0_init}")
 
@@ -196,7 +204,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
                 "before select_action."
             )
 
-        # Step 1: observe A_t^{cap}, feasibility, and c_t (assignment costs).
+        # Step 1: observe A_t^{cap}, feasibility, and c_t
         n = instance.n
         fallback_idx = instance.fallback_option_index
         cols = n + (1 if fallback_idx >= 0 else 0)
@@ -205,7 +213,7 @@ class PrimalDualPolicy(BaseOnlinePolicy):
         feas_rhs = np.asarray(step.feas_rhs, dtype=float)
         costs = current_cost_row(self.cfg, instance, step.step_id, cols).reshape(1, -1)
 
-        # Step 2: solve the price-aware MILP for this single arrival.
+        # Step 2: solve the price-aware MILP for this single arrival
         capacities = remaining_capacities(
             self.cfg,
             state,
@@ -707,9 +715,16 @@ class GenericDynamicLearningPolicy(BaseOnlinePolicy):
     Generic dynamic price-updating policy (no evictions).
     """
 
-    def __init__(self, cfg: Config, price_path: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        cfg: Config,
+        price_path: Optional[Path] = None,
+        *,
+        pricing_sample_seed: int | None = None,
+    ) -> None:
         self.cfg = cfg
         self.price_path = Path(price_path) if price_path else None
+        self._pricing_sample_seed = pricing_sample_seed
 
         # Runtime state
         self._instance_id: Optional[int] = None
@@ -760,6 +775,7 @@ class GenericDynamicLearningPolicy(BaseOnlinePolicy):
                 initial_state,
                 log_to_console=False,
                 sample_online_caps=bool(self.cfg.pricing_sim.sample_online_caps),
+                sample_seed=self._pricing_sample_seed,
                 num_samples=max(1, int(self.cfg.pricing_sim.num_samples)),
             ).reshape(-1)
             if sim_prices.size != int(instance.m):

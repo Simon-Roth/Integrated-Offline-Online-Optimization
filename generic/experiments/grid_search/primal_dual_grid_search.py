@@ -73,6 +73,8 @@ def _iter_param_grid(
     eta_decays_override: Sequence[float] | None,
     eta_mins_override: Sequence[float] | None,
     lambda0_inits: Sequence[str],
+    offline_util_init_scales: Sequence[float],
+    sim_lp_init_scales: Sequence[float],
     pricing_num_samples: Sequence[int],
     pricing_sample_online_caps: Sequence[bool],
     default_pricing_num_samples: int,
@@ -107,22 +109,40 @@ def _iter_param_grid(
                                 for lambda0_init in lambda0_inits:
                                     init = str(lambda0_init).lower()
                                     if init == "sim_lp":
-                                        for num_samples in pricing_num_samples:
-                                            for sample_caps in pricing_sample_online_caps:
-                                                row = dict(base)
-                                                row.update(
-                                                    {
-                                                        "lambda0_init": init,
-                                                        "pricing_num_samples": int(num_samples),
-                                                        "pricing_sample_online_caps": bool(sample_caps),
-                                                    }
-                                                )
-                                                yield row
+                                        for init_scale in sim_lp_init_scales:
+                                            for num_samples in pricing_num_samples:
+                                                for sample_caps in pricing_sample_online_caps:
+                                                    row = dict(base)
+                                                    row.update(
+                                                        {
+                                                            "lambda0_init": init,
+                                                            "offline_util_init_scale": None,
+                                                            "sim_lp_init_scale": float(init_scale),
+                                                            "pricing_num_samples": int(num_samples),
+                                                            "pricing_sample_online_caps": bool(sample_caps),
+                                                        }
+                                                    )
+                                                    yield row
+                                    elif init == "offline_util":
+                                        for init_scale in offline_util_init_scales:
+                                            row = dict(base)
+                                            row.update(
+                                                {
+                                                    "lambda0_init": init,
+                                                    "offline_util_init_scale": float(init_scale),
+                                                    "sim_lp_init_scale": None,
+                                                    "pricing_num_samples": int(default_pricing_num_samples),
+                                                    "pricing_sample_online_caps": bool(default_pricing_sample_online_caps),
+                                                }
+                                            )
+                                            yield row
                                     else:
                                         row = dict(base)
                                         row.update(
                                             {
                                                 "lambda0_init": init,
+                                                "offline_util_init_scale": None,
+                                                "sim_lp_init_scale": None,
                                                 "pricing_num_samples": int(default_pricing_num_samples),
                                                 "pricing_sample_online_caps": bool(default_pricing_sample_online_caps),
                                             }
@@ -139,7 +159,23 @@ def _apply_primal_dual_params(cfg, params: Dict[str, Any], horizon: int) -> None
     cfg.primal_dual.normalize_costs = bool(params["normalize_costs"])
     cfg.primal_dual.use_remaining_capacity_target = bool(params["use_remaining_capacity_target"])
     cfg.primal_dual.cost_scale_mode = str(params["cost_scale_mode"])
-    cfg.primal_dual.lambda0_init = str(params["lambda0_init"])
+    init = str(params["lambda0_init"]).lower()
+    cfg.primal_dual.lambda0_init = init
+    if init == "offline_util":
+        init_scale = params.get("offline_util_init_scale")
+        if init_scale is None:
+            raise ValueError("Missing offline_util_init_scale for lambda0_init=offline_util.")
+        cfg.primal_dual.offline_util_init_scale = float(init_scale)
+        cfg.primal_dual.sim_lp_init_scale = 1.0
+    elif init == "sim_lp":
+        sim_scale = params.get("sim_lp_init_scale")
+        if sim_scale is None:
+            raise ValueError("Missing sim_lp_init_scale for lambda0_init=sim_lp.")
+        cfg.primal_dual.offline_util_init_scale = None
+        cfg.primal_dual.sim_lp_init_scale = float(sim_scale)
+    else:
+        cfg.primal_dual.offline_util_init_scale = None
+        cfg.primal_dual.sim_lp_init_scale = 1.0
     cfg.pricing_sim.num_samples = int(params["pricing_num_samples"])
     cfg.pricing_sim.sample_online_caps = bool(params["pricing_sample_online_caps"])
     cfg.problem.T_off = 0
@@ -167,6 +203,11 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
 
 
 def _params_key(params: Dict[str, Any], horizon: int) -> Tuple[Any, ...]:
+    init = str(params["lambda0_init"]).lower()
+    offline_scale = (
+        float(params["offline_util_init_scale"]) if init == "offline_util" else None
+    )
+    sim_scale = float(params["sim_lp_init_scale"]) if init == "sim_lp" else None
     return (
         str(params["profile"]),
         bool(params["normalize_update"]),
@@ -177,7 +218,9 @@ def _params_key(params: Dict[str, Any], horizon: int) -> Tuple[Any, ...]:
         float(params["eta0"]),
         float(params["eta_decay"]),
         float(params["eta_min"]),
-        str(params["lambda0_init"]).lower(),
+        init,
+        offline_scale,
+        sim_scale,
         int(params["pricing_num_samples"]),
         bool(params["pricing_sample_online_caps"]),
         int(horizon),
@@ -189,9 +232,22 @@ def _row_key(
     *,
     horizon: int,
     default_lambda0_init: str,
+    default_offline_util_init_scale: float | None,
+    default_sim_lp_init_scale: float,
     default_pricing_num_samples: int,
     default_pricing_sample_online_caps: bool,
 ) -> Tuple[Any, ...]:
+    init = str(row.get("lambda0_init", default_lambda0_init)).lower()
+    if init == "offline_util":
+        raw_offline_scale = row.get("offline_util_init_scale", default_offline_util_init_scale)
+        offline_scale = None if raw_offline_scale is None else float(raw_offline_scale)
+    else:
+        offline_scale = None
+    if init == "sim_lp":
+        raw_sim_scale = row.get("sim_lp_init_scale", default_sim_lp_init_scale)
+        sim_scale = None if raw_sim_scale is None else float(raw_sim_scale)
+    else:
+        sim_scale = None
     return (
         str(row["profile"]),
         bool(row["normalize_update"]),
@@ -202,7 +258,9 @@ def _row_key(
         float(row["eta0"]),
         float(row["eta_decay"]),
         float(row["eta_min"]),
-        str(row.get("lambda0_init", default_lambda0_init)).lower(),
+        init,
+        offline_scale,
+        sim_scale,
         int(row.get("pricing_num_samples", default_pricing_num_samples)),
         bool(row.get("pricing_sample_online_caps", default_pricing_sample_online_caps)),
         int(row.get("horizon", horizon)),
@@ -225,6 +283,8 @@ def _write_outputs(
     config_path: str,
     profiles: Sequence[Dict[str, Any]],
     lambda0_inits: Sequence[str],
+    offline_util_init_scales: Sequence[float],
+    sim_lp_init_scales: Sequence[float],
     pricing_num_samples: Sequence[int],
     pricing_sample_online_caps: Sequence[bool],
     horizon: int,
@@ -244,6 +304,8 @@ def _write_outputs(
                 "horizon": int(horizon),
                 "profiles": [p["label"] for p in profiles],
                 "lambda0_inits": list(lambda0_inits),
+                "offline_util_init_scales": [float(v) for v in offline_util_init_scales],
+                "sim_lp_init_scales": [float(v) for v in sim_lp_init_scales],
                 "pricing_num_samples": [int(v) for v in pricing_num_samples],
                 "pricing_sample_online_caps": [bool(v) for v in pricing_sample_online_caps],
                 "total_param_count": int(total_param_count),
@@ -347,6 +409,20 @@ def _parse_args() -> argparse.Namespace:
         help="Optional list of primal_dual.lambda0_init values: offline_util, zero, sim_lp.",
     )
     parser.add_argument(
+        "--offline-util-init-scales",
+        nargs="*",
+        type=float,
+        default=None,
+        help="Optional list of primal_dual.offline_util_init_scale values (used when lambda0_init=offline_util).",
+    )
+    parser.add_argument(
+        "--sim-lp-init-scales",
+        nargs="*",
+        type=float,
+        default=None,
+        help="Optional list of primal_dual.sim_lp_init_scale values (used when lambda0_init=sim_lp).",
+    )
+    parser.add_argument(
         "--pricing-num-samples",
         nargs="*",
         type=int,
@@ -407,6 +483,32 @@ def main() -> None:
     if not lambda0_inits:
         raise ValueError("At least one --lambda0-inits value is required.")
 
+    default_offline_util_init_scale = base_cfg.primal_dual.offline_util_init_scale
+    offline_util_init_scales = (
+        tuple(args.offline_util_init_scales)
+        if args.offline_util_init_scales is not None
+        else (
+            (float(default_offline_util_init_scale),)
+            if default_offline_util_init_scale is not None
+            else (1e-5, 3e-5, 1e-4)
+        )
+    )
+    if "offline_util" in lambda0_inits and not offline_util_init_scales:
+        raise ValueError("At least one --offline-util-init-scales value is required.")
+    if any(float(v) < 0.0 for v in offline_util_init_scales):
+        raise ValueError("All --offline-util-init-scales values must be >= 0.")
+
+    default_sim_lp_init_scale = float(base_cfg.primal_dual.sim_lp_init_scale)
+    sim_lp_init_scales = (
+        tuple(args.sim_lp_init_scales)
+        if args.sim_lp_init_scales is not None
+        else (default_sim_lp_init_scale,)
+    )
+    if "sim_lp" in lambda0_inits and not sim_lp_init_scales:
+        raise ValueError("At least one --sim-lp-init-scales value is required.")
+    if any(float(v) < 0.0 for v in sim_lp_init_scales):
+        raise ValueError("All --sim-lp-init-scales values must be >= 0.")
+
     default_pricing_num_samples = max(1, int(base_cfg.pricing_sim.num_samples))
     default_pricing_sample_online_caps = bool(base_cfg.pricing_sim.sample_online_caps)
     pricing_num_samples = (
@@ -441,6 +543,8 @@ def main() -> None:
             eta_decays_override=eta_decays,
             eta_mins_override=eta_mins,
             lambda0_inits=lambda0_inits,
+            offline_util_init_scales=offline_util_init_scales,
+            sim_lp_init_scales=sim_lp_init_scales,
             pricing_num_samples=pricing_num_samples,
             pricing_sample_online_caps=pricing_sample_online_caps,
             default_pricing_num_samples=default_pricing_num_samples,
@@ -472,6 +576,8 @@ def main() -> None:
                     row,
                     horizon=int(args.horizon),
                     default_lambda0_init=str(base_cfg.primal_dual.lambda0_init).lower(),
+                    default_offline_util_init_scale=default_offline_util_init_scale,
+                    default_sim_lp_init_scale=default_sim_lp_init_scale,
                     default_pricing_num_samples=default_pricing_num_samples,
                     default_pricing_sample_online_caps=default_pricing_sample_online_caps,
                 )
@@ -512,6 +618,8 @@ def main() -> None:
             "eta_decay": params["eta_decay"],
             "eta_min": params["eta_min"],
             "lambda0_init": params["lambda0_init"],
+            "offline_util_init_scale": params["offline_util_init_scale"],
+            "sim_lp_init_scale": params["sim_lp_init_scale"],
             "pricing_num_samples": params["pricing_num_samples"],
             "pricing_sample_online_caps": params["pricing_sample_online_caps"],
             "horizon": int(args.horizon),
@@ -534,6 +642,8 @@ def main() -> None:
                 config_path=str(args.config),
                 profiles=profiles,
                 lambda0_inits=lambda0_inits,
+                offline_util_init_scales=offline_util_init_scales,
+                sim_lp_init_scales=sim_lp_init_scales,
                 pricing_num_samples=pricing_num_samples,
                 pricing_sample_online_caps=pricing_sample_online_caps,
                 horizon=int(args.horizon),
@@ -547,6 +657,8 @@ def main() -> None:
         config_path=str(args.config),
         profiles=profiles,
         lambda0_inits=lambda0_inits,
+        offline_util_init_scales=offline_util_init_scales,
+        sim_lp_init_scales=sim_lp_init_scales,
         pricing_num_samples=pricing_num_samples,
         pricing_sample_online_caps=pricing_sample_online_caps,
         horizon=int(args.horizon),

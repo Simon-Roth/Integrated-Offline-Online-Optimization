@@ -31,8 +31,14 @@ class DynamicLearningPolicy(GenericDynamicLearningPolicy):
     Dynamic price-updating policy with bgap-specific evictions.
     """
 
-    def __init__(self, cfg: Config, price_path: Optional[Path] = None) -> None:
-        super().__init__(cfg, price_path)
+    def __init__(
+        self,
+        cfg: Config,
+        price_path: Optional[Path] = None,
+        *,
+        pricing_sample_seed: int | None = None,
+    ) -> None:
+        super().__init__(cfg, price_path, pricing_sample_seed=pricing_sample_seed)
 
     def select_action(
         self,
@@ -84,6 +90,7 @@ class DynamicLearningPolicy(GenericDynamicLearningPolicy):
                 best_decision = decision
 
         if best_decision is not None:
+            self._mark_processed(step)
             return best_decision
 
         if decision is not None:

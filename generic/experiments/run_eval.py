@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import inspect
 import json
 import time
 from pathlib import Path
@@ -88,6 +89,19 @@ def _mean_or_placeholder(
     if not values_list:
         return placeholder
     return _mean(values_list)
+
+
+def _policy_accepts_pricing_seed(online_policy_cls: Type[BaseOnlinePolicy]) -> bool:
+    try:
+        params = inspect.signature(online_policy_cls.__init__).parameters
+    except (TypeError, ValueError):
+        return False
+    if "pricing_sample_seed" in params:
+        return True
+    return any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in params.values()
+    )
 
 
 def _build_run_summary(
@@ -340,14 +354,13 @@ def run_eval(
         policy_path = online_policy_name
         if policy_path is None:
             policy_path = f"{online_policy_cls.__module__}.{online_policy_cls.__name__}"
-        if policy_path == ONLINE_SIM_DUAL:
-            try:
-                online_policy = online_policy_cls(cfg, pricing_sample_seed=seed + 10000)
-            except TypeError as exc:
-                raise ValueError(
-                    f"{online_policy_cls.__name__} does not accept pricing_sample_seed but "
-                    f"policy '{policy_path}' requires deterministic pricing sampling."
-                ) from exc
+        if _policy_accepts_pricing_seed(online_policy_cls):
+            online_policy = online_policy_cls(cfg, pricing_sample_seed=seed + 10000)
+        elif policy_path == ONLINE_SIM_DUAL:
+            raise ValueError(
+                f"{online_policy_cls.__name__} does not accept pricing_sample_seed but "
+                f"policy '{policy_path}' requires deterministic pricing sampling."
+            )
         else:
             online_policy = online_policy_cls(cfg)
         online_solver = OnlineSolver(cfg, online_policy)

@@ -192,6 +192,9 @@ class PrimalDualConfig:
     - cost_scale_mode: "assign_mean" | "assign_bounds"
     - cost_scale_min: lower bound for cost scale to avoid divide-by-zero
     - lambda0_init: "offline_util" | "sim_lp" | "zero"
+    - offline_util_init_scale: independent scale for offline-util init.
+      Must be set when lambda0_init == "offline_util".
+    - sim_lp_init_scale: multiplicative scale for sim_lp warm-start prices
     """
     eta_mode: str = "sqrt"
     eta0: float = 0.05
@@ -203,6 +206,8 @@ class PrimalDualConfig:
     cost_scale_mode: str = "assign_mean"
     cost_scale_min: float = 1e-8
     lambda0_init: str = "offline_util"
+    offline_util_init_scale: Optional[float] = None
+    sim_lp_init_scale: float = 1.0
 
 @dataclass
 class SolverConfig:

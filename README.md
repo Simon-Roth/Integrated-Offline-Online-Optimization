@@ -24,7 +24,8 @@ The documentation below is organized by module and describes:
 - `bgap/`
   BGAP-specific heuristics, online policies, and experiments.
 - `configs/`
-  Base YAML configs used by generic and bgap workflows.
+  Runtime YAML configs used by generic and bgap workflows:
+  `generic/` (generic base), `bgap/` (bgap base override), `presets/` (optional tuning presets).
 - `analysis/`
   Analysis notebooks and scripts.
 - `scripts/`
@@ -89,6 +90,11 @@ Key flags:
 `bgap/core/config.py` merges `configs/generic/generic.yaml` with bgap overrides,
 so bgap experiments can change only what is needed.
 Defaults in `generic/core/config.py` mirror `configs/generic/generic.yaml`.
+
+### `configs/presets/*.yaml`
+Optional tuning presets (for example initialization/mode comparisons).
+They are not selected automatically by default runners; pass them explicitly via
+`--config` or `--base-config` when you want those settings.
 
 ---
 
@@ -293,7 +299,7 @@ Located in `bgap/online/policies/`:
 - `sim_base.py` (`SimBasePolicy`):
   legacy policy kept for reproducibility of older runs; expects file-based precomputed dual prices and is not used in default pipelines -> was replaced by SimDual generic policy.
 - `dynamic_learning.py` (`DynamicLearningPolicy`):
-  extends `GenericDynamicLearningPolicy` with bgap-specific eviction logic. When no regular bin fits (or the parent policy places in fallback), tries evictions for each candidate bin.
+  extends `GenericDynamicLearningPolicy` with bgap-specific eviction logic. When no regular bin fits (capacity exceeded), tries evictions for each candidate bin.
 
 ---
 
@@ -411,7 +417,7 @@ Grid search over `PrimalDualPolicy` hyperparameters:
 - Outputs `results.json`, `results.csv`, and `best.json` to the output directory.
 
 ```
-python scripts/run_primal_dual_grid_search.py \
+python scripts/grid_search/run_primal_dual_grid_search.py \
   --config configs/generic/generic.yaml \
   --horizon 300 \
   --seeds 1 2 3 5
@@ -423,7 +429,7 @@ Grid search over `DynamicLearningPolicy` hyperparameters:
 - Outputs `results.json`, `results.csv`, `combo_results.csv`, and `best.json`.
 
 ```
-python scripts/run_dla_grid_search.py \
+python scripts/grid_search/run_dla_grid_search.py \
   --base-config configs/bgap/bgap.yaml \
   --horizons 60 100 150
 ```
@@ -466,4 +472,3 @@ Notes:
 
 - `bgap/data/instance_generators_legacy.py`: old block-structured generator, kept as backup.
 - `bgap/online/policies/sim_base.py` (`SimBasePolicy`): legacy policy that reads file-based prices; not used in default pipelines.
-- `configs/default.yaml`: unused default config.

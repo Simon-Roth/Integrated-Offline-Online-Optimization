@@ -1,0 +1,33 @@
+util_pricing:
+  update_rule: "exponential"  # "polynomial" | "exponential"
+  price_exponent: 2.0        # used when update_rule == "polynomial"
+  exp_rate: 3                # used when update_rule == "exponential"
+  vector_prices: true
+
+generation:
+  generator: "bgap"
+
+dla:
+  epsilon: 0.01           # sampling fraction controlling phase boundaries
+  log_prices: false      # if true, write per-phase price logs for plotting
+  output_dir: "outputs/bgap/results/dla"
+  min_phase_len: 25       # optional lower bound on phase length
+  use_offline_slack: true
+
+# Retuned PD default for non-init-comparison plots.
+primal_dual:
+  eta_mode: "constant"
+  eta0: 0.00002
+  eta_decay: 0.0
+  eta_min: 0.0
+  normalize_update: false
+  normalize_costs: false
+  use_remaining_capacity_target: true
+  cost_scale_mode: "assign_mean"
+  lambda0_init: "sim_lp"
+  offline_util_init_scale: null
+  sim_lp_init_scale: 1.0
+
+pricing_sim:
+  num_samples: 25
+  sample_online_caps: true
